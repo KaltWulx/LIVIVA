@@ -1,0 +1,19 @@
+[Unit]
+Description=LIVIVA AI Assistant Service
+After=network.target
+
+[Service]
+Type=simple
+User=kalt
+WorkingDirectory=/home/kalt/Documentos/projects/liviva
+ExecStart=/home/kalt/Documentos/projects/liviva/liviva
+Restart=on-failure
+EnvironmentFile=/home/kalt/Documentos/projects/liviva/.env
+
+# Hardening
+ProtectSystem=full
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

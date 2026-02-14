@@ -1,0 +1,26 @@
+# Binaries
+/liviva
+/bin/
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Go
+vendor/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# IDEs
+.vscode/
+.idea/
