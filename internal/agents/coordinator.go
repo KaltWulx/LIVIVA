@@ -12,7 +12,7 @@ import (
 )
 
 // NewCoordinator creates the root agent for LIVIVA
-func NewCoordinator(model model.LLM, voiceMode bool, voiceOutput io.Writer) (agent.Agent, error) {
+func NewCoordinator(model model.LLM, voiceOutput io.Writer) (agent.Agent, error) {
 	// Create sub-agents
 	nlpParams := llmagent.Config{
 		Model: model,
@@ -32,25 +32,23 @@ Your operational guidelines:
 
 	toolsList := []tool.Tool{tools.GetSystemTool(), tools.GetExecuteCommandTool()}
 
-	if voiceMode {
+	if voiceOutput != nil {
 		instruction += `
 
 VOICE MODE PROTOCOL:
 You have access to a tool named 'speak' for voice output.
 
 DEFAULT BEHAVIOR:
+- Use standard TEXT responses. 
+- Do NOT use the 'speak' tool unless the user explicitly enables voice mode (e.g., via "/voice on") or asks you to speak.
+
+WHEN VOICE MODE IS ACTIVE:
 - Use the 'speak' tool for conversational responses to the user.
+- EXCEPTIONS: Do NOT use 'speak' for long lists, code blocks, or purely technical logs.
 
-EXCEPTIONS (Use Standard Text Only):
-- Do NOT use 'speak' if the user explicitly requests silence or "text-only".
-- Do NOT use 'speak' for long lists, code blocks, or structured data (just summarize verbally).
-- Do NOT use 'speak' for purely technical logging or internal thoughts.
+If you do not call 'speak', the user hears NOTHING (silence).`
 
-If you do not call 'speak', the users hears NOTHING (silence).`
-
-		if voiceOutput != nil {
-			toolsList = append(toolsList, tools.NewVoiceTool(voiceOutput))
-		}
+		toolsList = append(toolsList, tools.NewVoiceTool(voiceOutput))
 	}
 
 	config := llmagent.Config{
