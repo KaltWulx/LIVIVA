@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "github.com/kalt/liviva/pkg/api";
+
+service LivivaService {
+  // Bidirectional streaming for chat, audio, and commands
+  rpc ChatSession(stream ClientMessage) returns (stream ServerMessage);
+}
+
+message ClientMessage {
+  oneof payload {
+    string text = 1;         // User typed text or transcribed speech
+    bytes audio_chunk = 2;   // Raw audio bytes (PCM) from microphone
+    string system_command = 3; // e.g. "/voice on", "/shutdown"
+  }
+}
+
+message ServerMessage {
+  oneof payload {
+    string text = 1;         // Agent response text
+    bytes audio_chunk = 2;   // TTS audio bytes (MP3/PCM) to play
+    string tool_call = 3;    // Tool execution info (optional)
+    string system_log = 4;   // System/Debug logs
+    string speak_text = 5;   // Text for client-side TTS
+  }
+}
