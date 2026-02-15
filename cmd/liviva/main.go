@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"strings"
+	"sync"
 
 	"github.com/joho/godotenv"
 	"github.com/kalt/liviva/internal/agents"
@@ -42,10 +46,58 @@ func main() {
 	}
 	args = newArgs
 
+	// Create a pipe for the ADK launcher to read from
+	adkReader, adkWriter, err := os.Pipe()
+	if err != nil {
+		log.Fatalf("Failed to create ADK input pipe: %v", err)
+	}
+
+	// We replace os.Stdin for the launcher so it reads from our mixed stream
+	os.Stdin = adkReader
+
+	// InputManager Control State
+	// 0 = Voice Off, 1 = Voice On
+	voiceEnabled := false
+	var inputMutex sync.Mutex
+
+	// Goroutine to handle Keyboard Input (os.Stdin)
+	// We read from the ORIGINAL os.Stdin (fd 0), which we haven't closed,
+	// but we need to reference it carefully since we swapped the variable 'os.Stdin'.
+	// Actually, os.Stdin is just a var. The new 'os.Stdin' is 'adkReader'.
+	// We can use os.NewFile(0, "stdin") to get the original stdin back or just read from it before swapping?
+	// Better: Keep a reference to the original stdin BEFORE swapping.
+	keyboardInput := os.NewFile(0, "stdin")
+
+	go func() {
+		scanner := bufio.NewScanner(keyboardInput)
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// Intercept Slash Commands
+			if strings.TrimSpace(line) == "/voice on" {
+				inputMutex.Lock()
+				voiceEnabled = true
+				inputMutex.Unlock()
+				log.Println("[System] Voice Input ENABLED (Microphone ON)")
+				continue
+			}
+			if strings.TrimSpace(line) == "/voice off" {
+				inputMutex.Lock()
+				voiceEnabled = false
+				inputMutex.Unlock()
+				log.Println("[System] Voice Input DISABLED (Microphone OFF)")
+				continue
+			}
+
+			// Forward normal text to ADK
+			fmt.Fprintln(adkWriter, line)
+		}
+	}()
+
 	var voiceInput io.Writer
 
 	if useVoice {
-		log.Println("Starting voice interface...")
+		log.Println("Starting voice interface (default: OFF). Type '/voice on' to enable microphone.")
 		// Determine python executable
 		pythonPath := "python3"
 		if _, err := os.Stat(".venv/bin/python"); err == nil {
@@ -55,14 +107,14 @@ func main() {
 		// Launch python listener
 		cmd := exec.Command(pythonPath, "scripts/listen.py")
 
-		// Python stdin is where we write text to speak
+		// Python stdin is where we write text to speak (TTS) -> This remains same
 		pyStdin, err := cmd.StdinPipe()
 		if err != nil {
 			log.Fatalf("Failed to pipe python stdin: %v", err)
 		}
 		voiceInput = pyStdin
 
-		// Python stdout is where we read spoken text
+		// Python stdout is where we read spoken text (STT)
 		pyStdout, err := cmd.StdoutPipe()
 		if err != nil {
 			log.Fatalf("Failed to pipe python stdout: %v", err)
@@ -81,17 +133,24 @@ func main() {
 			}
 		}()
 
-		// Redirect STT: Python Output -> Go Input
-		// We create a pipe to replace os.Stdin so the launcher reads from the microphone text
-		rIn, wIn, _ := os.Pipe()
-		os.Stdin = rIn
+		// Goroutine to handle Voice Input (STT)
 		go func() {
-			io.Copy(wIn, pyStdout)
-		}()
+			scanner := bufio.NewScanner(pyStdout)
+			for scanner.Scan() {
+				text := scanner.Text()
 
-		// NOTE: We do NOT redirect os.Stdout to Python.
-		// Standard output will go to the terminal as "Inner Thoughts/Logs".
-		// Speech is handled explicitly via the VoiceTool writing to voiceInput.
+				// Check if voice is enabled
+				inputMutex.Lock()
+				enabled := voiceEnabled
+				inputMutex.Unlock()
+
+				if enabled {
+					// Forward voice text to ADK
+					fmt.Fprintln(adkWriter, text)
+				}
+				// If disabled, we just drop the voice text (it's still processed by Python but ignored here)
+			}
+		}()
 	}
 
 	// Initialize OpenAI or Copilot adapter
