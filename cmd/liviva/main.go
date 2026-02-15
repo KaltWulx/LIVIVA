@@ -76,6 +76,16 @@ func main() {
 		// voiceStdout io.ReadCloser  // For STT (handled in goroutine)
 	)
 
+	// Helper for prompt-safe logging
+	logSystem := func(msg string) {
+		// Clear line, print log, then restore prompt
+		// \r = return to start of line
+		// \033[K = clear to end of line
+		// fmt.Print DOESN'T add newline, log.Println DOES.
+		// We want: [CLEAR] -> [LOG]\n -> User -> [Cursor]
+		fmt.Printf("\r\033[K%s\nUser -> ", msg)
+	}
+
 	startVoice := func() error {
 		if voiceCmd != nil && voiceCmd.Process != nil {
 			return nil // Already running
@@ -94,7 +104,6 @@ func main() {
 			return fmt.Errorf("stdin pipe error: %w", err)
 		}
 		voiceStdin = stdin
-		// voiceInput = stdin // Removed
 
 		// Pipe for STT (Python -> Go)
 		stdout, err := cmd.StdoutPipe()
@@ -119,8 +128,13 @@ func main() {
 			scanner := bufio.NewScanner(stdout)
 			for scanner.Scan() {
 				text := scanner.Text()
-				// Only forward if voice is enabled (redundant check but safe)
-				// Actually, if process is running, voice is effectively "on".
+
+				// Optional: print recognized text with special prefix?
+				// The user sees "User -> ", and typing appears there.
+				// If voice injects text, it might look like:
+				// User -> [Voice]: Hello
+				// But ADK might print "User -> " again.
+				// For now, just forward.
 				fmt.Fprintln(adkWriter, text)
 			}
 		}()
@@ -138,8 +152,8 @@ func main() {
 					strings.Contains(line, "[TTS]") {
 					continue
 				}
-				// Print critical errors or other logs
-				log.Printf("[Voice] %s", line)
+				// Use safe logger
+				logSystem(fmt.Sprintf("[Voice] %s", line))
 			}
 		}()
 
@@ -158,7 +172,7 @@ func main() {
 	// Register /voice command
 	commands["/voice"] = func(args []string) {
 		if len(args) < 1 {
-			log.Println("[System] Usage: /voice [on|off]")
+			logSystem("[System] Usage: /voice [on|off]")
 			return
 		}
 		action := strings.ToLower(args[0])
@@ -169,26 +183,26 @@ func main() {
 		switch action {
 		case "on":
 			if voiceEnabled {
-				log.Println("[System] Voice is already ON.")
+				logSystem("[System] Voice is already ON.")
 				return
 			}
-			log.Println("[System] Starting voice engine...")
+			logSystem("[System] Starting voice engine...")
 			if err := startVoice(); err != nil {
-				log.Printf("[System] Failed to start voice: %v", err)
+				logSystem(fmt.Sprintf("[System] Failed to start voice: %v", err))
 				return
 			}
 			voiceEnabled = true
-			log.Println("[System] Voice Input ENABLED (Microphone ON)")
+			logSystem("[System] Voice Input ENABLED (Microphone ON)")
 		case "off":
 			if !voiceEnabled {
-				log.Println("[System] Voice is already OFF.")
+				logSystem("[System] Voice is already OFF.")
 				return
 			}
 			stopVoice()
 			voiceEnabled = false
-			log.Println("[System] Voice Input DISABLED (Microphone OFF)")
+			logSystem("[System] Voice Input DISABLED (Microphone OFF)")
 		default:
-			log.Printf("[System] Unknown voice action: '%s'. Use 'on' or 'off'.", action)
+			logSystem(fmt.Sprintf("[System] Unknown voice action: '%s'. Use 'on' or 'off'.", action))
 		}
 	}
 
@@ -205,9 +219,16 @@ func main() {
 					cmdName := strings.ToLower(parts[0])
 					if handler, ok := commands[cmdName]; ok {
 						handler(parts[1:])
+						// We intercepted the command, so the prompt usually "ends" here.
+						// The main loop in ADK prints prompt after standard input processing.
+						// Since we consumed it, we must restore prompt manually IF we want consistent behavior.
+						// BUT, our logSystem handles prompt restoration for output.
+						// If command produces output (it does), logSystem will restore.
+						// If command is silent, we might need to restore.
+						// Our commands are chatty, so it's fine.
 						continue
 					} else {
-						log.Printf("[System] Unknown command: %s", cmdName)
+						logSystem(fmt.Sprintf("[System] Unknown command: %s", cmdName))
 						continue
 					}
 				}
