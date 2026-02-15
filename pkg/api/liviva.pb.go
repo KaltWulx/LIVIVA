@@ -28,6 +28,8 @@ type ClientMessage struct {
 	//	*ClientMessage_Text
 	//	*ClientMessage_AudioChunk
 	//	*ClientMessage_SystemCommand
+	//	*ClientMessage_ToolResponse
+	//	*ClientMessage_SaveArtifactRequest
 	Payload       isClientMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -97,6 +99,24 @@ func (x *ClientMessage) GetSystemCommand() string {
 	return ""
 }
 
+func (x *ClientMessage) GetToolResponse() *ToolResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*ClientMessage_ToolResponse); ok {
+			return x.ToolResponse
+		}
+	}
+	return nil
+}
+
+func (x *ClientMessage) GetSaveArtifactRequest() *Artifact {
+	if x != nil {
+		if x, ok := x.Payload.(*ClientMessage_SaveArtifactRequest); ok {
+			return x.SaveArtifactRequest
+		}
+	}
+	return nil
+}
+
 type isClientMessage_Payload interface {
 	isClientMessage_Payload()
 }
@@ -113,11 +133,23 @@ type ClientMessage_SystemCommand struct {
 	SystemCommand string `protobuf:"bytes,3,opt,name=system_command,json=systemCommand,proto3,oneof"` // e.g. "/voice on", "/shutdown"
 }
 
+type ClientMessage_ToolResponse struct {
+	ToolResponse *ToolResponse `protobuf:"bytes,4,opt,name=tool_response,json=toolResponse,proto3,oneof"` // Output from a client-side tool
+}
+
+type ClientMessage_SaveArtifactRequest struct {
+	SaveArtifactRequest *Artifact `protobuf:"bytes,5,opt,name=save_artifact_request,json=saveArtifactRequest,proto3,oneof"` // Upload a file from client to server
+}
+
 func (*ClientMessage_Text) isClientMessage_Payload() {}
 
 func (*ClientMessage_AudioChunk) isClientMessage_Payload() {}
 
 func (*ClientMessage_SystemCommand) isClientMessage_Payload() {}
+
+func (*ClientMessage_ToolResponse) isClientMessage_Payload() {}
+
+func (*ClientMessage_SaveArtifactRequest) isClientMessage_Payload() {}
 
 type ServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -128,6 +160,9 @@ type ServerMessage struct {
 	//	*ServerMessage_ToolCall
 	//	*ServerMessage_SystemLog
 	//	*ServerMessage_SpeakText
+	//	*ServerMessage_ToolRequest
+	//	*ServerMessage_Artifact
+	//	*ServerMessage_Metrics
 	Payload       isServerMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -215,6 +250,33 @@ func (x *ServerMessage) GetSpeakText() string {
 	return ""
 }
 
+func (x *ServerMessage) GetToolRequest() *ToolRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*ServerMessage_ToolRequest); ok {
+			return x.ToolRequest
+		}
+	}
+	return nil
+}
+
+func (x *ServerMessage) GetArtifact() *Artifact {
+	if x != nil {
+		if x, ok := x.Payload.(*ServerMessage_Artifact); ok {
+			return x.Artifact
+		}
+	}
+	return nil
+}
+
+func (x *ServerMessage) GetMetrics() *Metrics {
+	if x != nil {
+		if x, ok := x.Payload.(*ServerMessage_Metrics); ok {
+			return x.Metrics
+		}
+	}
+	return nil
+}
+
 type isServerMessage_Payload interface {
 	isServerMessage_Payload()
 }
@@ -228,7 +290,7 @@ type ServerMessage_AudioChunk struct {
 }
 
 type ServerMessage_ToolCall struct {
-	ToolCall string `protobuf:"bytes,3,opt,name=tool_call,json=toolCall,proto3,oneof"` // Tool execution info (optional)
+	ToolCall string `protobuf:"bytes,3,opt,name=tool_call,json=toolCall,proto3,oneof"` // Legacy tool info (keep for backward compat if needed)
 }
 
 type ServerMessage_SystemLog struct {
@@ -237,6 +299,18 @@ type ServerMessage_SystemLog struct {
 
 type ServerMessage_SpeakText struct {
 	SpeakText string `protobuf:"bytes,5,opt,name=speak_text,json=speakText,proto3,oneof"` // Text for client-side TTS
+}
+
+type ServerMessage_ToolRequest struct {
+	ToolRequest *ToolRequest `protobuf:"bytes,6,opt,name=tool_request,json=toolRequest,proto3,oneof"` // Request to execute a tool on the client
+}
+
+type ServerMessage_Artifact struct {
+	Artifact *Artifact `protobuf:"bytes,7,opt,name=artifact,proto3,oneof"` // Download/Stream an artifact to the client
+}
+
+type ServerMessage_Metrics struct {
+	Metrics *Metrics `protobuf:"bytes,8,opt,name=metrics,proto3,oneof"` // Model usage and context stats
 }
 
 func (*ServerMessage_Text) isServerMessage_Payload() {}
@@ -249,17 +323,341 @@ func (*ServerMessage_SystemLog) isServerMessage_Payload() {}
 
 func (*ServerMessage_SpeakText) isServerMessage_Payload() {}
 
+func (*ServerMessage_ToolRequest) isServerMessage_Payload() {}
+
+func (*ServerMessage_Artifact) isServerMessage_Payload() {}
+
+func (*ServerMessage_Metrics) isServerMessage_Payload() {}
+
+type ToolRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                            // Correlation ID
+	ToolName      string                 `protobuf:"bytes,2,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`                // e.g. "system.exec"
+	ArgumentsJson string                 `protobuf:"bytes,3,opt,name=arguments_json,json=argumentsJson,proto3" json:"arguments_json,omitempty"` // JSON arguments for the tool
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolRequest) Reset() {
+	*x = ToolRequest{}
+	mi := &file_pkg_api_liviva_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolRequest) ProtoMessage() {}
+
+func (x *ToolRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_api_liviva_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolRequest.ProtoReflect.Descriptor instead.
+func (*ToolRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_api_liviva_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ToolRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ToolRequest) GetToolName() string {
+	if x != nil {
+		return x.ToolName
+	}
+	return ""
+}
+
+func (x *ToolRequest) GetArgumentsJson() string {
+	if x != nil {
+		return x.ArgumentsJson
+	}
+	return ""
+}
+
+type ToolResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`         // Correlation ID
+	Output        string                 `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"` // Tool output (text/json)
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`   // Error message if any
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolResponse) Reset() {
+	*x = ToolResponse{}
+	mi := &file_pkg_api_liviva_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolResponse) ProtoMessage() {}
+
+func (x *ToolResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_api_liviva_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolResponse.ProtoReflect.Descriptor instead.
+func (*ToolResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_api_liviva_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ToolResponse) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ToolResponse) GetOutput() string {
+	if x != nil {
+		return x.Output
+	}
+	return ""
+}
+
+func (x *ToolResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type Artifact struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Filename      string                 `protobuf:"bytes,1,opt,name=filename,proto3" json:"filename,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	MimeType      string                 `protobuf:"bytes,3,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	Version       int32                  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Artifact) Reset() {
+	*x = Artifact{}
+	mi := &file_pkg_api_liviva_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Artifact) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Artifact) ProtoMessage() {}
+
+func (x *Artifact) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_api_liviva_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Artifact.ProtoReflect.Descriptor instead.
+func (*Artifact) Descriptor() ([]byte, []int) {
+	return file_pkg_api_liviva_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Artifact) GetFilename() string {
+	if x != nil {
+		return x.Filename
+	}
+	return ""
+}
+
+func (x *Artifact) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *Artifact) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *Artifact) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+type SaveArtifactResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Filename      string                 `protobuf:"bytes,1,opt,name=filename,proto3" json:"filename,omitempty"`
+	Version       int32                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SaveArtifactResponse) Reset() {
+	*x = SaveArtifactResponse{}
+	mi := &file_pkg_api_liviva_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SaveArtifactResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SaveArtifactResponse) ProtoMessage() {}
+
+func (x *SaveArtifactResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_api_liviva_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SaveArtifactResponse.ProtoReflect.Descriptor instead.
+func (*SaveArtifactResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_api_liviva_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *SaveArtifactResponse) GetFilename() string {
+	if x != nil {
+		return x.Filename
+	}
+	return ""
+}
+
+func (x *SaveArtifactResponse) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *SaveArtifactResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type Metrics struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	PromptTokens      int32                  `protobuf:"varint,1,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
+	CompletionTokens  int32                  `protobuf:"varint,2,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
+	TotalTokens       int32                  `protobuf:"varint,3,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`
+	ContextPercentage int32                  `protobuf:"varint,4,opt,name=context_percentage,json=contextPercentage,proto3" json:"context_percentage,omitempty"` // Percentage of context window used
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *Metrics) Reset() {
+	*x = Metrics{}
+	mi := &file_pkg_api_liviva_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Metrics) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Metrics) ProtoMessage() {}
+
+func (x *Metrics) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_api_liviva_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Metrics.ProtoReflect.Descriptor instead.
+func (*Metrics) Descriptor() ([]byte, []int) {
+	return file_pkg_api_liviva_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Metrics) GetPromptTokens() int32 {
+	if x != nil {
+		return x.PromptTokens
+	}
+	return 0
+}
+
+func (x *Metrics) GetCompletionTokens() int32 {
+	if x != nil {
+		return x.CompletionTokens
+	}
+	return 0
+}
+
+func (x *Metrics) GetTotalTokens() int32 {
+	if x != nil {
+		return x.TotalTokens
+	}
+	return 0
+}
+
+func (x *Metrics) GetContextPercentage() int32 {
+	if x != nil {
+		return x.ContextPercentage
+	}
+	return 0
+}
+
 var File_pkg_api_liviva_proto protoreflect.FileDescriptor
 
 const file_pkg_api_liviva_proto_rawDesc = "" +
 	"\n" +
-	"\x14pkg/api/liviva.proto\x12\x03api\"|\n" +
+	"\x14pkg/api/liviva.proto\x12\x03api\"\xfb\x01\n" +
 	"\rClientMessage\x12\x14\n" +
 	"\x04text\x18\x01 \x01(\tH\x00R\x04text\x12!\n" +
 	"\vaudio_chunk\x18\x02 \x01(\fH\x00R\n" +
 	"audioChunk\x12'\n" +
-	"\x0esystem_command\x18\x03 \x01(\tH\x00R\rsystemCommandB\t\n" +
-	"\apayload\"\xb4\x01\n" +
+	"\x0esystem_command\x18\x03 \x01(\tH\x00R\rsystemCommand\x128\n" +
+	"\rtool_response\x18\x04 \x01(\v2\x11.api.ToolResponseH\x00R\ftoolResponse\x12C\n" +
+	"\x15save_artifact_request\x18\x05 \x01(\v2\r.api.ArtifactH\x00R\x13saveArtifactRequestB\t\n" +
+	"\apayload\"\xc2\x02\n" +
 	"\rServerMessage\x12\x14\n" +
 	"\x04text\x18\x01 \x01(\tH\x00R\x04text\x12!\n" +
 	"\vaudio_chunk\x18\x02 \x01(\fH\x00R\n" +
@@ -268,8 +666,33 @@ const file_pkg_api_liviva_proto_rawDesc = "" +
 	"\n" +
 	"system_log\x18\x04 \x01(\tH\x00R\tsystemLog\x12\x1f\n" +
 	"\n" +
-	"speak_text\x18\x05 \x01(\tH\x00R\tspeakTextB\t\n" +
-	"\apayload2J\n" +
+	"speak_text\x18\x05 \x01(\tH\x00R\tspeakText\x125\n" +
+	"\ftool_request\x18\x06 \x01(\v2\x10.api.ToolRequestH\x00R\vtoolRequest\x12+\n" +
+	"\bartifact\x18\a \x01(\v2\r.api.ArtifactH\x00R\bartifact\x12(\n" +
+	"\ametrics\x18\b \x01(\v2\f.api.MetricsH\x00R\ametricsB\t\n" +
+	"\apayload\"a\n" +
+	"\vToolRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\ttool_name\x18\x02 \x01(\tR\btoolName\x12%\n" +
+	"\x0earguments_json\x18\x03 \x01(\tR\rargumentsJson\"L\n" +
+	"\fToolResponse\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06output\x18\x02 \x01(\tR\x06output\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"q\n" +
+	"\bArtifact\x12\x1a\n" +
+	"\bfilename\x18\x01 \x01(\tR\bfilename\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
+	"\tmime_type\x18\x03 \x01(\tR\bmimeType\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\x05R\aversion\"b\n" +
+	"\x14SaveArtifactResponse\x12\x1a\n" +
+	"\bfilename\x18\x01 \x01(\tR\bfilename\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x05R\aversion\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"\xad\x01\n" +
+	"\aMetrics\x12#\n" +
+	"\rprompt_tokens\x18\x01 \x01(\x05R\fpromptTokens\x12+\n" +
+	"\x11completion_tokens\x18\x02 \x01(\x05R\x10completionTokens\x12!\n" +
+	"\ftotal_tokens\x18\x03 \x01(\x05R\vtotalTokens\x12-\n" +
+	"\x12context_percentage\x18\x04 \x01(\x05R\x11contextPercentage2J\n" +
 	"\rLivivaService\x129\n" +
 	"\vChatSession\x12\x12.api.ClientMessage\x1a\x12.api.ServerMessage(\x010\x01B Z\x1egithub.com/kalt/liviva/pkg/apib\x06proto3"
 
@@ -285,19 +708,29 @@ func file_pkg_api_liviva_proto_rawDescGZIP() []byte {
 	return file_pkg_api_liviva_proto_rawDescData
 }
 
-var file_pkg_api_liviva_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_pkg_api_liviva_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_pkg_api_liviva_proto_goTypes = []any{
-	(*ClientMessage)(nil), // 0: api.ClientMessage
-	(*ServerMessage)(nil), // 1: api.ServerMessage
+	(*ClientMessage)(nil),        // 0: api.ClientMessage
+	(*ServerMessage)(nil),        // 1: api.ServerMessage
+	(*ToolRequest)(nil),          // 2: api.ToolRequest
+	(*ToolResponse)(nil),         // 3: api.ToolResponse
+	(*Artifact)(nil),             // 4: api.Artifact
+	(*SaveArtifactResponse)(nil), // 5: api.SaveArtifactResponse
+	(*Metrics)(nil),              // 6: api.Metrics
 }
 var file_pkg_api_liviva_proto_depIdxs = []int32{
-	0, // 0: api.LivivaService.ChatSession:input_type -> api.ClientMessage
-	1, // 1: api.LivivaService.ChatSession:output_type -> api.ServerMessage
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	3, // 0: api.ClientMessage.tool_response:type_name -> api.ToolResponse
+	4, // 1: api.ClientMessage.save_artifact_request:type_name -> api.Artifact
+	2, // 2: api.ServerMessage.tool_request:type_name -> api.ToolRequest
+	4, // 3: api.ServerMessage.artifact:type_name -> api.Artifact
+	6, // 4: api.ServerMessage.metrics:type_name -> api.Metrics
+	0, // 5: api.LivivaService.ChatSession:input_type -> api.ClientMessage
+	1, // 6: api.LivivaService.ChatSession:output_type -> api.ServerMessage
+	6, // [6:7] is the sub-list for method output_type
+	5, // [5:6] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_pkg_api_liviva_proto_init() }
@@ -309,6 +742,8 @@ func file_pkg_api_liviva_proto_init() {
 		(*ClientMessage_Text)(nil),
 		(*ClientMessage_AudioChunk)(nil),
 		(*ClientMessage_SystemCommand)(nil),
+		(*ClientMessage_ToolResponse)(nil),
+		(*ClientMessage_SaveArtifactRequest)(nil),
 	}
 	file_pkg_api_liviva_proto_msgTypes[1].OneofWrappers = []any{
 		(*ServerMessage_Text)(nil),
@@ -316,6 +751,9 @@ func file_pkg_api_liviva_proto_init() {
 		(*ServerMessage_ToolCall)(nil),
 		(*ServerMessage_SystemLog)(nil),
 		(*ServerMessage_SpeakText)(nil),
+		(*ServerMessage_ToolRequest)(nil),
+		(*ServerMessage_Artifact)(nil),
+		(*ServerMessage_Metrics)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -323,7 +761,7 @@ func file_pkg_api_liviva_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_api_liviva_proto_rawDesc), len(file_pkg_api_liviva_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

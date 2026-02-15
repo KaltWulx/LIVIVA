@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -114,6 +115,7 @@ func (m *OpenAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 			}
 			accumulatedTools := make(map[int]*toolCallAccumulator)
 			var accumulatedText strings.Builder
+			var lastUsage *OpenAIUsage
 
 			for scanner.Scan() {
 				line := scanner.Text()
@@ -129,6 +131,10 @@ func (m *OpenAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 				if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
 					log.Printf("error unmarshalling stream data: %v", err)
 					continue
+				}
+
+				if streamResp.Usage != nil {
+					lastUsage = streamResp.Usage
 				}
 
 				if len(streamResp.Choices) > 0 {
@@ -214,6 +220,13 @@ func (m *OpenAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 					Partial:      false,
 					TurnComplete: true,
 				}
+				if lastUsage != nil {
+					modelResp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+						PromptTokenCount:     int32(lastUsage.PromptTokens),
+						CandidatesTokenCount: int32(lastUsage.CompletionTokens),
+						TotalTokenCount:      int32(lastUsage.TotalTokens),
+					}
+				}
 				if !yield(modelResp, nil) {
 					return
 				}
@@ -236,8 +249,10 @@ func (m *OpenAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 			msg := fullResp.Choices[0].Message
 			parts := []*genai.Part{}
 
-			if msg.Content != "" {
-				parts = append(parts, &genai.Part{Text: msg.Content})
+			if msg.Content != nil {
+				if text, ok := msg.Content.(string); ok && text != "" {
+					parts = append(parts, &genai.Part{Text: text})
+				}
 			}
 
 			// Handle Tool Calls
@@ -269,6 +284,13 @@ func (m *OpenAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 				},
 				TurnComplete: true,
 			}
+			if fullResp.Usage != nil {
+				modelResp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+					PromptTokenCount:     int32(fullResp.Usage.PromptTokens),
+					CandidatesTokenCount: int32(fullResp.Usage.CompletionTokens),
+					TotalTokenCount:      int32(fullResp.Usage.TotalTokens),
+				}
+			}
 			yield(modelResp, nil)
 		}
 	}
@@ -276,24 +298,46 @@ func (m *OpenAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 
 // Helper structs for OpenAI API
 type OpenAIRequest struct {
-	Model      string          `json:"model"`
-	Messages   []OpenAIMessage `json:"messages"`
-	Stream     bool            `json:"stream"`
-	Tools      []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice any             `json:"tool_choice,omitempty"`
+	Model         string               `json:"model"`
+	Messages      []OpenAIMessage      `json:"messages"`
+	Stream        bool                 `json:"stream"`
+	StreamOptions *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	Tools         []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice    any                  `json:"tool_choice,omitempty"`
+}
+
+type OpenAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type OpenAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Content    any              `json:"content,omitempty"` // string or []OpenAIContentPart
 	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
+}
+
+type OpenAIContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *OpenAIImageURL `json:"image_url,omitempty"`
+}
+
+type OpenAIImageURL struct {
+	URL string `json:"url"`
 }
 
 type OpenAIResponse struct {
 	Choices []struct {
 		Message OpenAIMessage `json:"message"`
 	} `json:"choices"`
+	Usage *OpenAIUsage `json:"usage,omitempty"`
+}
+
+type OpenAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 type OpenAIStreamResponse struct {
@@ -304,6 +348,7 @@ type OpenAIStreamResponse struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason,omitempty"`
 	} `json:"choices"`
+	Usage *OpenAIUsage `json:"usage,omitempty"`
 }
 
 type OpenAIStreamToolCall struct {
@@ -377,16 +422,33 @@ func (m *OpenAIModel) prepareRequest(req *model.LLMRequest, stream bool) ([]byte
 			}
 
 			if !hasToolResponse {
-				// Regular user message
-				var textBuilder strings.Builder
+				// Regular user message - now supports multimodal (Text + InlineData)
+				contentParts := []OpenAIContentPart{}
 				for _, part := range content.Parts {
 					if part.Text != "" {
-						textBuilder.WriteString(part.Text)
+						contentParts = append(contentParts, OpenAIContentPart{
+							Type: "text",
+							Text: part.Text,
+						})
+					}
+					if part.InlineData != nil {
+						// Convert binary data to base64 data URL
+						data64 := base64.StdEncoding.EncodeToString(part.InlineData.Data)
+						dataURL := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MIMEType, data64)
+						contentParts = append(contentParts, OpenAIContentPart{
+							Type: "image_url",
+							ImageURL: &OpenAIImageURL{
+								URL: dataURL,
+							},
+						})
 					}
 				}
+
+				// If only 1 text part, we can keep it simple as a string (optional)
+				// But using []OpenAIContentPart is robust.
 				messages = append(messages, OpenAIMessage{
 					Role:    "user",
-					Content: textBuilder.String(),
+					Content: contentParts,
 				})
 			}
 		}
@@ -428,6 +490,10 @@ func (m *OpenAIModel) prepareRequest(req *model.LLMRequest, stream bool) ([]byte
 		Model:    m.model,
 		Messages: messages,
 		Stream:   stream,
+	}
+
+	if stream {
+		openAIReq.StreamOptions = &OpenAIStreamOptions{IncludeUsage: true}
 	}
 
 	if len(tools) > 0 {

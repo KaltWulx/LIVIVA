@@ -14,6 +14,8 @@ message ClientMessage {
     string text = 1;         // User typed text or transcribed speech
     bytes audio_chunk = 2;   // Raw audio bytes (PCM) from microphone
     string system_command = 3; // e.g. "/voice on", "/shutdown"
+    ToolResponse tool_response = 4; // Output from a client-side tool
+    Artifact save_artifact_request = 5; // Upload a file from client to server
   }
 }
 
@@ -21,8 +23,43 @@ message ServerMessage {
   oneof payload {
     string text = 1;         // Agent response text
     bytes audio_chunk = 2;   // TTS audio bytes (MP3/PCM) to play
-    string tool_call = 3;    // Tool execution info (optional)
+    string tool_call = 3;    // Legacy tool info (keep for backward compat if needed)
     string system_log = 4;   // System/Debug logs
     string speak_text = 5;   // Text for client-side TTS
+    ToolRequest tool_request = 6; // Request to execute a tool on the client
+    Artifact artifact = 7;      // Download/Stream an artifact to the client
+    Metrics metrics = 8;        // Model usage and context stats
   }
+}
+
+message ToolRequest {
+  string id = 1;          // Correlation ID
+  string tool_name = 2;   // e.g. "system.exec"
+  string arguments_json = 3; // JSON arguments for the tool
+}
+
+message ToolResponse {
+  string id = 1;          // Correlation ID
+  string output = 2;      // Tool output (text/json)
+  string error = 3;       // Error message if any
+}
+
+message Artifact {
+  string filename = 1;
+  bytes data = 2;
+  string mime_type = 3;
+  int32 version = 4;
+}
+
+message SaveArtifactResponse {
+  string filename = 1;
+  int32 version = 2;
+  string error = 3;
+}
+
+message Metrics {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+  int32 context_percentage = 4; // Percentage of context window used
 }
