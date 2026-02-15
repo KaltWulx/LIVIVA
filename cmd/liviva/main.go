@@ -68,25 +68,153 @@ func main() {
 	// Better: Keep a reference to the original stdin BEFORE swapping.
 	keyboardInput := os.NewFile(0, "stdin")
 
+	// Command Registry
+	type CommandHandler func(args []string)
+	commands := make(map[string]CommandHandler)
+
+	// Voice Process Management
+	var (
+		voiceCmd   *exec.Cmd
+		voiceStdin io.WriteCloser // For TTS
+		// voiceInput io.Writer      // This needs to be declared here for the agent
+		// voiceStdout io.ReadCloser  // For STT (handled in goroutine)
+	)
+
+	startVoice := func() error {
+		if voiceCmd != nil && voiceCmd.Process != nil {
+			return nil // Already running
+		}
+
+		pythonPath := "python3"
+		if _, err := os.Stat(".venv/bin/python"); err == nil {
+			pythonPath = ".venv/bin/python"
+		}
+
+		cmd := exec.Command(pythonPath, "scripts/listen.py")
+
+		// Pipe for TTS (Go -> Python)
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("stdin pipe error: %w", err)
+		}
+		voiceStdin = stdin
+		// voiceInput = stdin // Removed
+
+		// Pipe for STT (Python -> Go)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("stdout pipe error: %w", err)
+		}
+
+		// Pipe for Logs (Python Stderr -> Go Filtering)
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return fmt.Errorf("stderr pipe error: %w", err)
+		}
+
+		// Start Process
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start error: %w", err)
+		}
+		voiceCmd = cmd
+
+		// Handle STT (Forward recognized text to ADK)
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				text := scanner.Text()
+				// Only forward if voice is enabled (redundant check but safe)
+				// Actually, if process is running, voice is effectively "on".
+				fmt.Fprintln(adkWriter, text)
+			}
+		}()
+
+		// Handle Stderr Filtering (Clean Console)
+		go func() {
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				line := scanner.Text()
+				// Filter out noisy logs
+				if strings.Contains(line, "Listening...") ||
+					strings.Contains(line, "Processing audio...") ||
+					strings.Contains(line, "Adjusting for ambient noise") ||
+					strings.Contains(line, "Speaking:") ||
+					strings.Contains(line, "[TTS]") {
+					continue
+				}
+				// Print critical errors or other logs
+				log.Printf("[Voice] %s", line)
+			}
+		}()
+
+		return nil
+	}
+
+	stopVoice := func() {
+		if voiceCmd != nil && voiceCmd.Process != nil {
+			voiceCmd.Process.Kill()
+			voiceCmd.Wait()
+		}
+		voiceCmd = nil
+		voiceStdin = nil
+	}
+
+	// Register /voice command
+	commands["/voice"] = func(args []string) {
+		if len(args) < 1 {
+			log.Println("[System] Usage: /voice [on|off]")
+			return
+		}
+		action := strings.ToLower(args[0])
+
+		inputMutex.Lock()
+		defer inputMutex.Unlock()
+
+		switch action {
+		case "on":
+			if voiceEnabled {
+				log.Println("[System] Voice is already ON.")
+				return
+			}
+			log.Println("[System] Starting voice engine...")
+			if err := startVoice(); err != nil {
+				log.Printf("[System] Failed to start voice: %v", err)
+				return
+			}
+			voiceEnabled = true
+			log.Println("[System] Voice Input ENABLED (Microphone ON)")
+		case "off":
+			if !voiceEnabled {
+				log.Println("[System] Voice is already OFF.")
+				return
+			}
+			stopVoice()
+			voiceEnabled = false
+			log.Println("[System] Voice Input DISABLED (Microphone OFF)")
+		default:
+			log.Printf("[System] Unknown voice action: '%s'. Use 'on' or 'off'.", action)
+		}
+	}
+
 	go func() {
 		scanner := bufio.NewScanner(keyboardInput)
 		for scanner.Scan() {
 			line := scanner.Text()
+			trimmed := strings.TrimSpace(line)
 
 			// Intercept Slash Commands
-			if strings.TrimSpace(line) == "/voice on" {
-				inputMutex.Lock()
-				voiceEnabled = true
-				inputMutex.Unlock()
-				log.Println("[System] Voice Input ENABLED (Microphone ON)")
-				continue
-			}
-			if strings.TrimSpace(line) == "/voice off" {
-				inputMutex.Lock()
-				voiceEnabled = false
-				inputMutex.Unlock()
-				log.Println("[System] Voice Input DISABLED (Microphone OFF)")
-				continue
+			if strings.HasPrefix(trimmed, "/") {
+				parts := strings.Fields(trimmed)
+				if len(parts) > 0 {
+					cmdName := strings.ToLower(parts[0])
+					if handler, ok := commands[cmdName]; ok {
+						handler(parts[1:])
+						continue
+					} else {
+						log.Printf("[System] Unknown command: %s", cmdName)
+						continue
+					}
+				}
 			}
 
 			// Forward normal text to ADK
@@ -94,63 +222,13 @@ func main() {
 		}
 	}()
 
-	var voiceInput io.Writer
+	// Cleanup on exit
+	defer stopVoice()
 
+	// Initial Voice State (Keep OFF by default, as requested)
 	if useVoice {
-		log.Println("Starting voice interface (default: OFF). Type '/voice on' to enable microphone.")
-		// Determine python executable
-		pythonPath := "python3"
-		if _, err := os.Stat(".venv/bin/python"); err == nil {
-			pythonPath = ".venv/bin/python"
-		}
-
-		// Launch python listener
-		cmd := exec.Command(pythonPath, "scripts/listen.py")
-
-		// Python stdin is where we write text to speak (TTS) -> This remains same
-		pyStdin, err := cmd.StdinPipe()
-		if err != nil {
-			log.Fatalf("Failed to pipe python stdin: %v", err)
-		}
-		voiceInput = pyStdin
-
-		// Python stdout is where we read spoken text (STT)
-		pyStdout, err := cmd.StdoutPipe()
-		if err != nil {
-			log.Fatalf("Failed to pipe python stdout: %v", err)
-		}
-
-		cmd.Stderr = os.Stderr // Pass errors through
-
-		if err := cmd.Start(); err != nil {
-			log.Fatalf("Failed to start scripts/listen.py: %v", err)
-		}
-
-		// Ensure cleanup
-		defer func() {
-			if cmd.Process != nil {
-				cmd.Process.Kill()
-			}
-		}()
-
-		// Goroutine to handle Voice Input (STT)
-		go func() {
-			scanner := bufio.NewScanner(pyStdout)
-			for scanner.Scan() {
-				text := scanner.Text()
-
-				// Check if voice is enabled
-				inputMutex.Lock()
-				enabled := voiceEnabled
-				inputMutex.Unlock()
-
-				if enabled {
-					// Forward voice text to ADK
-					fmt.Fprintln(adkWriter, text)
-				}
-				// If disabled, we just drop the voice text (it's still processed by Python but ignored here)
-			}
-		}()
+		// Just log instruction, don't start yet
+		log.Println("Voice module loaded. Type '/voice on' to enable.")
 	}
 
 	// Initialize OpenAI or Copilot adapter
@@ -188,7 +266,21 @@ func main() {
 	}
 
 	// Create Coordinator agent
-	coordinator, err := agents.NewCoordinator(model, useVoice, voiceInput)
+	// Note: voiceStdin may be nil initially if voice is off.
+	// The Coordinator needs to handle a dynamic writer or checks.
+	// Ideally, we wrap it in a struct that writes to the current voiceStdin.
+
+	// Dynamic Voice Writer wrapper
+	voiceWriter := &DynamicWriter{
+		Writer: func() io.Writer {
+			if voiceEnabled && voiceStdin != nil {
+				return voiceStdin
+			}
+			return nil
+		},
+	}
+
+	coordinator, err := agents.NewCoordinator(model, useVoice, voiceWriter)
 	if err != nil {
 		log.Fatalf("Failed to create coordinator agent: %v", err)
 	}
@@ -203,4 +295,17 @@ func main() {
 	if err := l.Execute(ctx, config, args); err != nil {
 		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
+}
+
+// DynamicWriter allows switching the underlying writer at runtime
+type DynamicWriter struct {
+	Writer func() io.Writer
+}
+
+func (dw *DynamicWriter) Write(p []byte) (n int, err error) {
+	w := dw.Writer()
+	if w == nil {
+		return len(p), nil // Silently discard if no writer
+	}
+	return w.Write(p)
 }
