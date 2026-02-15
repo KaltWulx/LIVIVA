@@ -2,13 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
-
-	"encoding/json"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -16,6 +16,9 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/kalt/liviva/internal/agents"
 	"github.com/kalt/liviva/internal/llm"
+	"github.com/kalt/liviva/internal/mcp"
+	"github.com/kalt/liviva/internal/services"
+	"github.com/kalt/liviva/internal/store"
 	"github.com/kalt/liviva/pkg/api"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -140,7 +143,33 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 	tDispatcher := &toolDispatcher{safeStream: safe, responses: make(map[string]chan string)}
 
 	// Create Coordinator for this session
-	coord, err := agents.NewCoordinator(s.llmModel, vWriter, tDispatcher)
+	// TODO: Use a proper session-scoped or global memory service.
+	// For now, we use a new instance per session but sharing the same DB.
+	memorySvc := services.NewSQLiteMemoryService(store.DB)
+	// Initialize MCP Host
+	mcpConfigPath := os.Getenv("MCP_CONFIG_PATH")
+	if mcpConfigPath == "" {
+		home, _ := os.UserHomeDir()
+		mcpConfigPath = filepath.Join(home, ".liviva", "mcp_config.json")
+	}
+	// Ensure config exists or fallback to project local
+	if _, err := os.Stat(mcpConfigPath); os.IsNotExist(err) {
+		mcpConfigPath = "config/mcp_config.json"
+	}
+
+	mcpHost, err := mcp.NewHost(mcpConfigPath)
+	if err != nil {
+		log.Printf("Failed to initialize MCP Host: %v. Continuing without MCP tools.", err)
+		mcpHost = &mcp.Host{}
+	} else {
+		// Initialize connections (mcptoolset will handle actual connection on usage, or we trigger it)
+		// My Host.Start iterates and creates toolsets.
+		if err := mcpHost.Start(stream.Context()); err != nil {
+			log.Printf("Error starting MCP servers: %v", err)
+		}
+	}
+
+	coord, err := agents.NewCoordinator(s.llmModel, vWriter, tDispatcher, memorySvc, mcpHost)
 	if err != nil {
 		return fmt.Errorf("failed to create coordinator: %w", err)
 	}
@@ -164,6 +193,9 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 	}); err != nil {
 		return err
 	}
+
+	// Buffer for pending artifacts (images/files) to be attached to the next text message
+	var pendingParts []*genai.Part
 
 	for {
 		in, err := stream.Recv()
@@ -192,12 +224,16 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 		case *api.ClientMessage_SaveArtifactRequest:
 			art := p.SaveArtifactRequest
 			log.Printf("Received Artifact Upload: %s", art.Filename)
+
+			// Create Part for Model
 			part := &genai.Part{
 				InlineData: &genai.Blob{
 					MIMEType: art.MimeType,
 					Data:     art.Data,
 				},
 			}
+
+			// Save to persistent storage
 			resp, err := s.artifactService.Save(stream.Context(), &artifact.SaveRequest{
 				AppName:   "LIVIVA",
 				UserID:    userId,
@@ -205,6 +241,7 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 				FileName:  art.Filename,
 				Part:      part,
 			})
+
 			if err != nil {
 				log.Printf("Error saving artifact: %v", err)
 				safe.Send(&api.ServerMessage{
@@ -219,16 +256,28 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 						SystemLog: fmt.Sprintf("File uploaded: %s (Version: %d)", art.Filename, resp.Version),
 					},
 				})
+
+				// Add to pending parts for the next message
+				pendingParts = append(pendingParts, part)
 			}
 
 		case *api.ClientMessage_Text:
 			log.Printf("Processing Request: %s", p.Text)
 
-			// Handle Agent execution in a separate goroutine to avoid blocking Recv (DEADLOCK FIX)
-			go func(userText string) {
+			// Copy pending parts to avoid race conditions with the goroutine
+			currentParts := make([]*genai.Part, len(pendingParts))
+			copy(currentParts, pendingParts)
+			pendingParts = nil // Clear for future messages
+
+			// Handle Agent execution in a separate goroutine
+			go func(userText string, attachments []*genai.Part) {
+				// Construct message with text AND attachments
+				msgParts := []*genai.Part{{Text: userText}}
+				msgParts = append(msgParts, attachments...)
+
 				msg := &genai.Content{
 					Role:  genai.RoleUser,
-					Parts: []*genai.Part{{Text: userText}},
+					Parts: msgParts,
 				}
 
 				// Run the agent turn and stream events back
@@ -250,8 +299,7 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 						}
 						if event.LLMResponse.UsageMetadata != nil {
 							usage := event.LLMResponse.UsageMetadata
-							// Simple context percentage calculation (assuming 128k limit for now)
-							// TODO: Make this dynamic based on model name
+							// Simple context percentage calculation
 							percentage := int32((usage.TotalTokenCount * 100) / 128000)
 							if percentage > 100 {
 								percentage = 100
@@ -270,7 +318,7 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 						}
 					}
 				}
-			}(p.Text)
+			}(p.Text, currentParts)
 		}
 	}
 }
@@ -280,6 +328,12 @@ func Run() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env found")
 	}
+
+	// Initialize Database
+	if err := store.InitDB(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer store.CloseDB()
 
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	copilotKey := os.Getenv("COPILOT_API_KEY")
