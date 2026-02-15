@@ -28,16 +28,12 @@ func main() {
 	ctx := context.Background()
 
 	// Handle flags
-	useVoice := false
+	useVoice := true // Default to true
 	llmDebug := false
 	args := os.Args[1:]
 
-	newArgs := []string{}
+	var newArgs []string
 	for _, arg := range args {
-		if arg == "--voice" {
-			useVoice = true
-			continue
-		}
 		if arg == "--llm-debug" {
 			llmDebug = true
 			continue
@@ -228,7 +224,7 @@ func main() {
 	// Initial Voice State (Keep OFF by default, as requested)
 	if useVoice {
 		// Just log instruction, don't start yet
-		log.Println("Voice module loaded. Type '/voice on' to enable.")
+		log.Println("Voice module ready. Type '/voice on' to start interactions.")
 	}
 
 	// Initialize OpenAI or Copilot adapter
