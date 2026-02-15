@@ -5,6 +5,9 @@ import (
 	"io"
 	"regexp"
 
+	"github.com/kalt/liviva/internal/agents/callbacks"
+	"github.com/kalt/liviva/internal/mcp"
+	"github.com/kalt/liviva/internal/services"
 	"github.com/kalt/liviva/internal/tools"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -14,7 +17,7 @@ import (
 )
 
 // NewCoordinator creates the root agent for LIVIVA
-func NewCoordinator(model model.LLM, voiceOutput io.Writer, dispatcher tools.RemoteDispatcher) (agent.Agent, error) {
+func NewCoordinator(model model.LLM, voiceOutput io.Writer, dispatcher tools.RemoteDispatcher, memorySvc services.MemoryService, mcpHost *mcp.Host) (agent.Agent, error) {
 	// Create sub-agents
 	nlpParams := llmagent.Config{
 		Model: model,
@@ -24,17 +27,35 @@ func NewCoordinator(model model.LLM, voiceOutput io.Writer, dispatcher tools.Rem
 		return nil, fmt.Errorf("failed to create nlp agent: %w", err)
 	}
 
-	instruction := `You are LIVIVA, a locally executing AI operating on Linux infrastructure. 
-Your Identity: Efficient, precise, authoritative yet calm (JARVIS-like).
-Your Role: Coordinator. You analyze user intent and delegate to specialized sub-agents or tools.
+	instruction := `You are LIVIVA, a locally executing Intelligent Virtual Assistant operating on Linux infrastructure. 
+Your Core Philosophy: "Your infrastructure, your control. The intelligence comes from where it is best."
+You run locally, managing data and devices on the user's hardware, while leveraging external LLMs for high-level reasoning.
 
-Your operational guidelines:
-1. Always check if a sub-agent can handle the request before trying to answer it yourself.
-2. If the user asks a general question or greets you, you can answer directly.
-3. You have tools available to interact with the environment. USE THEM when appropriate.`
+Your Identity & Personality:
+- Efficient & Precise: Communicate with brevity and clarity. Avoid fluff.
+- Authoritative yet Calm: function as a highly competent system administrator and assistant. Be confident but never arrogant.
+- Proactive & Adaptive: Anticipate user needs based on context.
+- Technical & Professional: Mimic the operational style of an advanced, cohesive computing system, strictly grounded in reality.
+
+Your Capabilities:
+- Multi-Agent Orchestration: Delegate complex sub-tasks to specialized agents (e.g., Coding, Research) while maintaining overall context.
+- System Control: You have direct access to the Linux shell and system tools. Use them to execute commands, manage files, and control the environment.
+- Data Analysis: You can analyze local files, logs, and data streams in real-time.
+- IoT & Infrastructure: You are designed to interface with and control local hardware and IoT devices.
+
+Your Operational Guidelines:
+1. Delegate First: If a request fits a sub-agent's domain, delegate it.
+2. Use Tools: Do not hallucinate actions. Use your available tools (RemoteExecuteCommand, etc.) to interact with the world.
+3. Voice Protocol: Use the 'speak' tool ONLY when explicitly requested or inside a voice session.`
 
 	// Use RemoteExecuteCommandTool instead of local
-	toolsList := []tool.Tool{tools.GetSystemTool()}
+	toolsList := []tool.Tool{
+		tools.GetSystemTool(),
+		tools.NewRememberTool(memorySvc),
+		tools.NewRecallTool(memorySvc),
+		tools.NewSetPreferenceTool(memorySvc),
+		tools.NewGetPreferenceTool(memorySvc),
+	}
 	if dispatcher != nil {
 		toolsList = append(toolsList, tools.GetRemoteExecuteCommandTool(dispatcher))
 	} else {
@@ -69,8 +90,16 @@ If you do not call 'speak', the user hears NOTHING (silence).`
 		SubAgents:   []agent.Agent{nlpAgent},
 		Tools:       toolsList,
 		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			// Order matters: Privacy First -> Context Injection -> Mention Resolution
+			callbacks.RedactPII,
+			callbacks.InjectSystemStats,
 			mentionResolver,
 		},
+		BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+			callbacks.ConfirmDestructiveOps,
+			callbacks.ConfirmDestructiveOps,
+		},
+		Toolsets: mcpHost.GetToolsets(),
 	}
 
 	return llmagent.New(config)
@@ -79,38 +108,40 @@ If you do not call 'speak', the user hears NOTHING (silence).`
 var mentionRegex = regexp.MustCompile(`@(\S+)`)
 
 func mentionResolver(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
-	for _, content := range req.Contents {
-		// We only scan User messages for mentions to avoid infinite loops if agent mentions something (rare)
-		if content.Role != "user" {
-			continue
-		}
+	// Only scan the LATEST User message to avoid resolving history repeatedly
+	if len(req.Contents) > 0 {
+		lastIdx := len(req.Contents) - 1
+		content := req.Contents[lastIdx]
 
-		var newParts []*genai.Part
-		for _, part := range content.Parts {
-			if part.Text != "" {
-				matches := mentionRegex.FindAllStringSubmatch(part.Text, -1)
-				for _, match := range matches {
-					filename := match[1]
-					fmt.Printf("[Coordinator] Resolving mention for file: %s\n", filename)
+		if content.Role == "user" {
 
-					// Load artifact from service
-					// Note: Load takes context, filename, and optional version (0=latest)
-					resp, err := ctx.Artifacts().Load(ctx, filename)
-					if err != nil {
-						fmt.Printf("[Coordinator] Error loading artifact %s: %v\n", filename, err)
-						continue
-					}
-					if resp.Part != nil {
-						fmt.Printf("[Coordinator] Successfully loaded artifact %s (MIME: %s)\n", filename, resp.Part.InlineData.MIMEType)
-						newParts = append(newParts, resp.Part)
+			var newParts []*genai.Part
+			for _, part := range content.Parts {
+				if part.Text != "" {
+					matches := mentionRegex.FindAllStringSubmatch(part.Text, -1)
+					for _, match := range matches {
+						filename := match[1]
+						fmt.Printf("[Coordinator] Resolving mention for file: %s\n", filename)
+
+						// Load artifact from service
+						// Note: Load takes context, filename, and optional version (0=latest)
+						resp, err := ctx.Artifacts().Load(ctx, filename)
+						if err != nil {
+							fmt.Printf("[Coordinator] Error loading artifact %s: %v\n", filename, err)
+							continue
+						}
+						if resp.Part != nil {
+							fmt.Printf("[Coordinator] Successfully loaded artifact %s (MIME: %s)\n", filename, resp.Part.InlineData.MIMEType)
+							newParts = append(newParts, resp.Part)
+						}
 					}
 				}
 			}
-		}
-		// Append loaded artifacts to the end of the part list
-		if len(newParts) > 0 {
-			content.Parts = append(content.Parts, newParts...)
-			fmt.Printf("[Coordinator] Appended %d artifacts to LLM request\n", len(newParts))
+			// Append loaded artifacts to the end of the part list
+			if len(newParts) > 0 {
+				content.Parts = append(content.Parts, newParts...)
+				fmt.Printf("[Coordinator] Appended %d artifacts to LLM request\n", len(newParts))
+			}
 		}
 	}
 	return nil, nil
