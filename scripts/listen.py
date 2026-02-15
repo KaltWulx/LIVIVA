@@ -94,39 +94,45 @@ def speak(text):
     stop_speaking() # Ensure previous is stopped
     
     is_agent_speaking.set()
+    sys.stdout.write("[SPEAKING] START\n")
+    sys.stdout.flush()
     with speech_lock:
         try:
             sys.stderr.write(f"[TTS] Generating audio...\n")
             # Run generation synchronously
-            gen_proc = subprocess.run(gen_cmd, shell=True, stderr=None) # stderr=None lets errors show
+            gen_proc = subprocess.run(gen_cmd, shell=True, stderr=None) 
             
             if gen_proc.returncode != 0:
                  sys.stderr.write(f"[TTS] Generation failed with code {gen_proc.returncode}\n")
                  is_agent_speaking.clear()
+                 sys.stdout.write("[SPEAKING] END\n")
+                 sys.stdout.flush()
                  return
 
             sys.stderr.write(f"[TTS] Playing audio...\n")
             
             # Step 2: Play audio
-            # --no-terminal: don't clutter stdout
-            # --msg-level=all=warn: show warnings/errors
             play_cmd = f"mpv --no-terminal --msg-level=all=warn {audio_file}"
             
             current_speech_process = subprocess.Popen(
                 play_cmd, 
                 shell=True, 
                 preexec_fn=os.setsid,
-                stderr=None # Show mpv errors
+                stderr=None
             )
         except Exception as e:
             sys.stderr.write(f"[TTS] Failed to start: {e}\n")
             is_agent_speaking.clear()
+            sys.stdout.write("[SPEAKING] END\n")
+            sys.stdout.flush()
             return
 
     # Wait for completion, but allow barge-in to kill it
     if current_speech_process:
         current_speech_process.wait()
     is_agent_speaking.clear()
+    sys.stdout.write("[SPEAKING] END\n")
+    sys.stdout.flush()
 
 def listen_loop():
     """Continuously listen for speech and print to stdout."""
@@ -134,15 +140,19 @@ def listen_loop():
         sys.stderr.write("Adjusting for ambient noise... (Please wait)\n")
         recognizer.adjust_for_ambient_noise(source, duration=1)
         # Increase pause threshold to be less sensitive to natural pauses in speech
-        recognizer.pause_threshold = 1.5 
+        recognizer.pause_threshold = 2.0
+        # How much silence to wait for before considering a phrase finished
+        recognizer.non_speaking_duration = 0.8
         
         while not shutdown_flag.is_set():
             try:
                 sys.stderr.write("Listening...\n")
-                # Wait for speech
+                # HALF-DUPLEX CHECK:
+                # We use a short phrase_time_limit and check is_agent_speaking frequently
+                # In this loop version, we rely on the fact that listen() blocks but we want to be able to abort it
+                # Increased phrase_time_limit to allow for longer sentences
                 audio = recognizer.listen(source, timeout=None, phrase_time_limit=15)
                 
-                # HALF-DUPLEX CHECK:
                 # If agent was speaking during capture, discard it (high probability of self-feedback)
                 if is_agent_speaking.is_set():
                     sys.stderr.write("Ignoring input (Agent is speaking)...\n")
