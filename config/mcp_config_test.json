@@ -1,0 +1,7 @@
+[
+    {
+        "command": "./internal/server/test_mcp_server",
+        "args": [],
+        "env": []
+    }
+]

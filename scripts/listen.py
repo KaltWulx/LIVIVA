@@ -40,6 +40,7 @@ shutdown_flag = threading.Event()
 current_speech_process = None
 speech_lock = threading.Lock()
 is_agent_speaking = threading.Event()
+last_speech_end_time = 0
 
 def signal_handler(sig, frame):
     sys.stderr.write("\nExiting...\n")
@@ -51,7 +52,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 def stop_speaking():
     """Stop the current TTS process immediately."""
-    global current_speech_process
+    global current_speech_process, last_speech_end_time
     with speech_lock:
         if current_speech_process:
             try:
@@ -62,11 +63,15 @@ def stop_speaking():
             except Exception as e:
                 sys.stderr.write(f"Error stopping speech: {e}\n")
             current_speech_process = None
+    
+    # Mark end time to avoid immediate re-listening of cut-off audio
+    if is_agent_speaking.is_set():
+        last_speech_end_time = time.time()
     is_agent_speaking.clear()
 
 def speak(text):
     """Synthesize speech from text using edge-tts piped to mpv."""
-    global current_speech_process
+    global current_speech_process, last_speech_end_time
     
     if not text.strip():
         return
@@ -84,8 +89,6 @@ def speak(text):
     # Securely quote the text for shell execution
     quoted_text = shlex.quote(clean_text)
     
-    # SPLIT: Generate to file, then play
-    # This avoids pipe issues and allows better error handling/logging
     audio_file = "/tmp/liviva_speech.mp3"
     
     # Step 1: Generate audio
@@ -104,6 +107,7 @@ def speak(text):
             
             if gen_proc.returncode != 0:
                  sys.stderr.write(f"[TTS] Generation failed with code {gen_proc.returncode}\n")
+                 last_speech_end_time = time.time() # Mark end even on failure
                  is_agent_speaking.clear()
                  sys.stdout.write("[SPEAKING] END\n")
                  sys.stdout.flush()
@@ -122,6 +126,7 @@ def speak(text):
             )
         except Exception as e:
             sys.stderr.write(f"[TTS] Failed to start: {e}\n")
+            last_speech_end_time = time.time()
             is_agent_speaking.clear()
             sys.stdout.write("[SPEAKING] END\n")
             sys.stdout.flush()
@@ -130,12 +135,15 @@ def speak(text):
     # Wait for completion, but allow barge-in to kill it
     if current_speech_process:
         current_speech_process.wait()
+    
+    last_speech_end_time = time.time()
     is_agent_speaking.clear()
     sys.stdout.write("[SPEAKING] END\n")
     sys.stdout.flush()
 
 def listen_loop():
     """Continuously listen for speech and print to stdout."""
+    global last_speech_end_time
     with sr.Microphone() as source:
         sys.stderr.write("Adjusting for ambient noise... (Please wait)\n")
         recognizer.adjust_for_ambient_noise(source, duration=1)
@@ -147,16 +155,28 @@ def listen_loop():
         while not shutdown_flag.is_set():
             try:
                 sys.stderr.write("Listening...\n")
-                # HALF-DUPLEX CHECK:
-                # We use a short phrase_time_limit and check is_agent_speaking frequently
-                # In this loop version, we rely on the fact that listen() blocks but we want to be able to abort it
-                # Increased phrase_time_limit to allow for longer sentences
+                
+                # Check for agent speaking *before* listening
+                if is_agent_speaking.is_set():
+                     time.sleep(0.1)
+                     continue
+
+                listen_start_time = time.time()
+                
+                # Listen (blocking)
                 audio = recognizer.listen(source, timeout=None, phrase_time_limit=15)
                 
-                # If agent was speaking during capture, discard it (high probability of self-feedback)
+                # ANTI-ECHO LOGIC:
+                # Discard input if:
+                # 1. Agent IS currently speaking (barge-in / overlap)
+                # 2. Agent FINISHED speaking *after* we started listening (meaning we captured the agent's voice)
                 if is_agent_speaking.is_set():
-                    sys.stderr.write("Ignoring input (Agent is speaking)...\n")
-                    continue
+                     sys.stderr.write("Ignoring input (Agent is speaking)...\n")
+                     continue
+                
+                if last_speech_end_time > listen_start_time:
+                     sys.stderr.write(f"Ignoring input (Agent spoke during capture)...\n")
+                     continue
 
                 sys.stderr.write("Processing audio...\n")
                 try:

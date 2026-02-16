@@ -25,7 +25,7 @@ type CommandPalette struct {
 	active    bool
 }
 
-func NewCommandPalette() CommandPalette {
+func NewCommandPalette() *CommandPalette {
 	ti := textinput.New()
 	ti.Placeholder = "Type a command..."
 	ti.Focus()
@@ -33,7 +33,7 @@ func NewCommandPalette() CommandPalette {
 	ti.CharLimit = 156
 	ti.Width = 50
 
-	return CommandPalette{
+	return &CommandPalette{
 		textInput: ti,
 		commands:  []Command{}, // To be populated
 		filtered:  []Command{},
@@ -47,9 +47,19 @@ func (m *CommandPalette) SetCommands(cmds []Command) {
 	m.filterCommands()
 }
 
-func (m *CommandPalette) Toggle() {
-	m.active = !m.active
-	if m.active {
+// Dialog Interface Implementation
+
+func (m *CommandPalette) Title() string {
+	return "Command Palette"
+}
+
+func (m *CommandPalette) Active() bool {
+	return m.active
+}
+
+func (m *CommandPalette) SetActive(active bool) {
+	m.active = active
+	if active {
 		m.textInput.Focus()
 		m.textInput.SetValue("")
 		m.filterCommands()
@@ -58,8 +68,8 @@ func (m *CommandPalette) Toggle() {
 	}
 }
 
-func (m *CommandPalette) IsActive() bool {
-	return m.active
+func (m *CommandPalette) Toggle() {
+	m.SetActive(!m.active)
 }
 
 func (m *CommandPalette) filterCommands() {
@@ -81,7 +91,11 @@ func (m *CommandPalette) filterCommands() {
 	}
 }
 
-func (m CommandPalette) Update(msg tea.Msg) (CommandPalette, tea.Cmd) {
+func (m *CommandPalette) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m *CommandPalette) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !m.active {
 		return m, nil
 	}
@@ -124,7 +138,7 @@ func (m CommandPalette) Update(msg tea.Msg) (CommandPalette, tea.Cmd) {
 	return m, cmd
 }
 
-func (m CommandPalette) View() string {
+func (m *CommandPalette) View() string {
 	if !m.active {
 		return ""
 	}

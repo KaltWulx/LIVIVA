@@ -10,33 +10,36 @@ type ViewState int
 const (
 	ViewHome ViewState = iota
 	ViewSession
-	ViewHelp
+	ViewSettings
 )
+
+type NavigateMsg ViewState
 
 // Router manages the navigation between different TUI views
 type Router struct {
 	CurrentView ViewState
-	Width       int
-	Height      int
+	ctx         *Context
 }
 
-func NewRouter() *Router {
+func NewRouter(ctx *Context) *Router {
 	return &Router{
 		CurrentView: ViewHome,
+		ctx:         ctx,
 	}
 }
 
+func (r *Router) Init() tea.Cmd {
+	return nil
+}
+
 func (r *Router) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Router logic mainly handles global navigation commands
-	// But individual views will likely handle their own updates
-	return nil, nil // Placeholder
+	switch msg := msg.(type) {
+	case NavigateMsg:
+		r.CurrentView = ViewState(msg)
+	}
+	return r, nil
 }
 
-func (r *Router) SetView(view ViewState) {
-	r.CurrentView = view
-}
-
-func (r *Router) Resize(width, height int) {
-	r.Width = width
-	r.Height = height
+func (r *Router) View() string {
+	return "" // This will typically be called by the main model's View to decide what to render
 }

@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,17 +20,25 @@ import (
 )
 
 var (
-	sttCmd     *exec.Cmd
-	sttMu      sync.Mutex
-	sttRunning bool
-	sttStdin   io.WriteCloser
-	p          *tea.Program
-	sendMu     sync.Mutex // Mutex for gRPC stream
+	p      *tea.Program
+	sendMu sync.Mutex // Mutex for gRPC stream
+	voice  *VoiceService
 )
 
 // Run starts the client TUI
 func Run(addr string) {
+	// Redirect logs to file to avoid TUI corruption
+	f, err := os.OpenFile("liviva-client.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error opening log file: %v", err)
+	}
+	defer f.Close()
+	log.SetOutput(f)
+
 	log.Printf("Connecting to LIVIVA Server at %s...", addr)
+
+	// Initialize Voice Service
+	voice = NewVoiceService()
 
 	// Dial Server
 	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -54,9 +61,9 @@ func Run(addr string) {
 		return func() tea.Msg {
 			// Local Command Detection
 			if strings.HasPrefix(text, "/voice on") {
-				startSTT(stream)
+				voice.Start(stream, &sendMu)
 			} else if strings.HasPrefix(text, "/voice off") {
-				stopSTT()
+				voice.Stop()
 			} else if strings.HasPrefix(text, "/upload ") {
 				path := strings.TrimSpace(strings.TrimPrefix(text, "/upload "))
 				if err := sendArtifact(stream, path); err != nil {
@@ -66,17 +73,29 @@ func Run(addr string) {
 				return nil
 			}
 
-			// @Mention detection
+			// Smart File Detection (with or without @)
 			words := strings.Fields(text)
 			for _, word := range words {
+				candidate := word
+				// 1. Explicit @mention
 				if strings.HasPrefix(word, "@") {
-					path := strings.TrimPrefix(word, "@")
-					// Check if file exists localy
-					if _, err := os.Stat(path); err == nil {
-						p.Send(serverMsg{text: fmt.Sprintf("Uploading %s...", path), isSystem: true})
-						if err := sendArtifact(stream, path); err != nil {
-							p.Send(errMsg(fmt.Errorf("failed to upload %s: %v", path, err)))
-						}
+					candidate = strings.TrimPrefix(word, "@")
+				} else {
+					// 2. Implicit detection by extension (for voice/ease)
+					// Only checks likely filenames to avoid spam
+					if !strings.Contains(candidate, ".") {
+						continue
+					}
+					// Filter out common punctuation if attached
+					candidate = strings.TrimRight(candidate, ".,;?!")
+				}
+
+				// Check if file exists locally
+				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+					// Prevent redundant uploads logic could go here, but for now we trust the existence check
+					p.Send(serverMsg{text: fmt.Sprintf("Auto-detect: Uploading %s...", candidate), isSystem: true})
+					if err := sendArtifact(stream, candidate); err != nil {
+						p.Send(errMsg(fmt.Errorf("failed to upload %s: %v", candidate, err)))
 					}
 				}
 			}
@@ -95,8 +114,9 @@ func Run(addr string) {
 	}
 
 	// Initialize TUI
-	m := initialModel(sender)
+	m := NewAppModel(sender)
 	p = tea.NewProgram(m, tea.WithAltScreen())
+	voice.SetProgram(p)
 
 	// Receiver Goroutine (Server -> Client)
 	go func() {
@@ -117,7 +137,7 @@ func Run(addr string) {
 				p.Send(serverMsg{text: pld.SystemLog, isSystem: true})
 			case *api.ServerMessage_SpeakText:
 				p.Send(serverMsg{text: pld.SpeakText, isVoice: true})
-				go speak(pld.SpeakText)
+				go voice.Speak(pld.SpeakText)
 			case *api.ServerMessage_ToolRequest:
 				go handleToolRequest(stream, pld.ToolRequest)
 			case *api.ServerMessage_Artifact:
@@ -138,162 +158,10 @@ func Run(addr string) {
 	}
 
 	stream.CloseSend()
-	stopSTT()
+	voice.Stop()
 }
 
-// startSTT launches the microphone listener script
-func startSTT(stream api.LivivaService_ChatSessionClient) {
-	sttMu.Lock()
-	defer sttMu.Unlock()
-
-	if sttRunning {
-		return
-	}
-
-	// Resolution of bins: Check .venv first, then PATH
-	cwd, _ := os.Getwd()
-	venvPython := filepath.Join(cwd, ".venv", "bin", "python3")
-	pythonPath := "python3"
-	if _, err := os.Stat(venvPython); err == nil {
-		pythonPath = venvPython
-	}
-
-	scriptPath := "./scripts/listen.py"
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-		scriptPath = filepath.Join(cwd, "scripts", "listen.py")
-	}
-
-	cmd := exec.Command(pythonPath, scriptPath)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		msg := fmt.Sprintf("STT Error: failed to get stdout pipe: %v", err)
-		log.Print(msg)
-		if p != nil {
-			p.Send(serverMsg{text: msg, isSystem: true})
-		}
-		return
-	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		msg := fmt.Sprintf("STT Error: failed to get stdin pipe: %v", err)
-		log.Print(msg)
-		return
-	}
-	sttStdin = stdin
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		log.Printf("STT Error: failed to get stderr pipe: %v", err)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		msg := fmt.Sprintf("STT Error: failed to start stt.py: %v", err)
-		log.Print(msg)
-		if p != nil {
-			p.Send(serverMsg{text: msg, isSystem: true})
-		}
-		return
-	}
-
-	sttCmd = cmd
-	sttRunning = true
-	if p != nil {
-		p.Send(recordingMsg(true))
-	}
-
-	// Goroutine to read stderr
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			log.Printf("STT Debug: %s", scanner.Text())
-		}
-	}()
-
-	// Goroutine to read transcribed text
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			transcribed := scanner.Text()
-			if transcribed != "" {
-				if transcribed == "[SPEAKING] START" {
-					if p != nil {
-						p.Send(playingMsg(true))
-					}
-					continue
-				}
-				if transcribed == "[SPEAKING] END" {
-					if p != nil {
-						p.Send(playingMsg(false))
-					}
-					continue
-				}
-
-				if p != nil {
-					p.Send(serverMsg{text: transcribed, isVoice: true})
-				}
-
-				sendMu.Lock()
-				stream.Send(&api.ClientMessage{
-					Payload: &api.ClientMessage_Text{
-						Text: transcribed,
-					},
-				})
-				sendMu.Unlock()
-			}
-		}
-		sttMu.Lock()
-		sttRunning = false
-		sttStdin = nil
-		if p != nil {
-			p.Send(recordingMsg(false))
-		}
-		sttMu.Unlock()
-	}()
-}
-
-// stopSTT kills the microphone listener script
-func stopSTT() {
-	sttMu.Lock()
-	defer sttMu.Unlock()
-
-	if !sttRunning || sttCmd == nil {
-		return
-	}
-
-	if err := sttCmd.Process.Signal(os.Interrupt); err != nil {
-		sttCmd.Process.Kill()
-	}
-	sttCmd.Wait()
-	sttRunning = false
-	if p != nil {
-		p.Send(recordingMsg(false))
-	}
-}
-
-// speak executes local TTS and plays audio
-func speak(text string) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-
-	sttMu.Lock()
-	defer sttMu.Unlock()
-
-	if !sttRunning || sttStdin == nil {
-		log.Printf("Voice Warning: Skip speaking, voice mode is off")
-		return
-	}
-
-	// Just write to listen.py stdin
-	fmt.Fprintln(sttStdin, text)
-
-	// Note: We don't have a direct way to know when listen.py finishes speaking
-	// from here without more complex IPC, but listen.py itself manages the
-	// is_agent_speaking flag internally.
-}
+// Deprecated functions removed (moved to VoiceService)
 
 // handleToolRequest executes the requested tool and sends the response back
 func handleToolRequest(stream api.LivivaService_ChatSessionClient, req *api.ToolRequest) {

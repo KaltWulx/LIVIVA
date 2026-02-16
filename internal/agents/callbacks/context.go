@@ -3,6 +3,7 @@ package callbacks
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
@@ -67,4 +68,37 @@ RAM: %s
 	fmt.Printf("[Callback] Injected System Context: %s\n", now)
 
 	return nil, nil // Continue with modified request
+}
+
+// InjectUserState is a BeforeModel callback that injects persistent user/app preferences
+// from the ADK state into the system prompt.
+func InjectUserState(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+	var prefsBlock string
+	found := false
+
+	// Gather all user: preferences (exclude transient app state)
+	for k, v := range ctx.ReadonlyState().All() {
+		if strings.HasPrefix(k, "user:") {
+			if !found {
+				prefsBlock = "\n[USER PREFERENCES]\n"
+				found = true
+			}
+			prefsBlock += fmt.Sprintf("- %s: %v\n", k, v)
+		}
+	}
+
+	if !found {
+		return nil, nil
+	}
+	prefsBlock += "----------------\n"
+
+	// Inject into System Instruction
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		if len(req.Config.SystemInstruction.Parts) > 0 {
+			original := req.Config.SystemInstruction.Parts[0].Text
+			req.Config.SystemInstruction.Parts[0].Text = original + "\n" + prefsBlock
+		}
+	}
+
+	return nil, nil
 }

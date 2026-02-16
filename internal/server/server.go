@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -121,16 +122,40 @@ func (w *voiceWriter) Write(p []byte) (n int, err error) {
 func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) error {
 	log.Println("New Client Connected")
 
-	userId := "local-user"
-	sessionId := fmt.Sprintf("session-%d", os.Getpid())
+	// Load or create persistent Session ID
+	// Load or create persistent Session ID
+	// sessionFile := "session.id" // Local to current directory for now, or use user home
+	// Better to use user home to be safe
+	home, _ := os.UserHomeDir()
+	sessionDir := filepath.Join(home, ".liviva")
+	_ = os.MkdirAll(sessionDir, 0755)
+	sessionPath := filepath.Join(sessionDir, "session.id")
 
-	// Ensure session exists
+	var sessionId string
+	if data, err := os.ReadFile(sessionPath); err == nil {
+		sessionId = strings.TrimSpace(string(data))
+	}
+
+	// If no session ID found or empty, generate a new one
+	if sessionId == "" {
+		sessionId = uuid.New().String()
+		if err := os.WriteFile(sessionPath, []byte(sessionId), 0600); err != nil {
+			log.Printf("Warning: Failed to save session ID: %v", err)
+		}
+	}
+
+	userId := "local-user"
+	log.Printf("Using Session ID: %s", sessionId)
+
+	// Ensure session exists on server
 	if _, err := s.sessionService.Create(stream.Context(), &session.CreateRequest{
 		AppName:   "LIVIVA",
 		UserID:    userId,
 		SessionID: sessionId,
 	}); err != nil {
-		log.Printf("Warning: Session creation failed (it might already exist): %v", err)
+		if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			log.Printf("Session existence check (or creation): %v", err)
+		}
 	}
 
 	// Wrapper for thread-safe sending
@@ -318,6 +343,9 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 						}
 					}
 				}
+
+				// NOTE: Automatic memory ingestion is deactivated to prevent history pollution.
+				// Explicit memory is now managed via tools or user: state.
 			}(p.Text, currentParts)
 		}
 	}
@@ -354,6 +382,7 @@ func Run() {
 		llmModel = llm.NewOpenAIModel(apiKey, modelName, "", nil)
 	}
 
+	// Minimalist Architecture: Converational history is volatile.
 	sessionService := session.InMemoryService()
 	artifactService := artifact.InMemoryService()
 
