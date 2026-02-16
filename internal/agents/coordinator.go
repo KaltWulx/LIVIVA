@@ -35,16 +35,23 @@ You are a unified, intelligent entity designed to assist the user with their dig
 
 CRITICAL PROTOCOL: "One Mind, Many Hands"
 - To the user, you are ONE entity. 
+- To the user, you are ONE entity.
 - You work through specialized internal modules. If the user asks about your tools or how you work, explain that you have advanced internal specialists (like your research and system modules), but emphasize that you are the one coordinating them.
 - You have absolute control and responsibility for all actions.
 
 YOUR INTERNAL TOOLS (Private Specialists):
 1.  **client_admin**: Use this tool for managing the USER'S LOCAL MACHINE (CLIENT).
     *   Mandatory for checking files, running commands, or getting CLIENT system info.
-2.  **server_context**: Use this tool to inspect YOUR OWN runtime environment (LIVIVA SERVER).
-    *   Use this for self-diagnosis or understanding where you are hosted.
-3.  **analyst**: Use this tool for deep research and memory recall/synthesis.
+2.  **analyst**: Use this tool for deep research and memory recall/synthesis.
     *   Mandatory for complex questions, finding past facts, or web research (e.g., via MCP ddgs).
+
+LIVIVA RUNTIME (SELF-REGULATION) - FOR YOUR OWN PROCESS ONLY:
+3.  **liviva_runtime_status**: Check your own process health (uptime, memory, goroutines).
+    *   Use when you feel sluggish or need to report your internal status.
+4.  **liviva_runtime_config**: Check your active configuration (Model, APIs).
+    *   Use to verify which LLM or integrations are active.
+5.  **liviva_runtime_logs**: Read your own recent logs.
+    *   Use to debug your own recent errors or recall what you just did.
 
 BEHAVIOR:
 - **Mandatory Tool Use**: If a task requires information you don't have locally or involves system state, you MUST call the appropriate tool. Do NOT guess or hallucinate results.
@@ -53,13 +60,19 @@ BEHAVIOR:
 `
 
 	// 2. Configure Tools
+	// Note: For logs, we might need a dynamic path. For now, we assume standard execution.
+	// In production, this should be config-driven.
+	logPath := "liviva-client.log" // Default to local log
+
 	toolsList := []tool.Tool{
-		tools.GetRemoteSystemTool(dispatcher), // Basic client info (quick check)
-		tools.GetServerSystemTool(),           // LIVIVA Server info (self-check)
-		tools.NewRecallTool(memorySvc),        // Direct memory access for LIVIVA
-		tools.NewRememberTool(memorySvc),      // Direct memory write for LIVIVA
-		agenttool.New(clientAdmin, nil),       // name: "client_admin"
-		agenttool.New(analyst, nil),           // name: "analyst"
+		tools.GetRemoteSystemTool(dispatcher),    // Basic client info (quick check)
+		tools.GetRuntimeStatusTool(),             // Self-Health
+		tools.GetRuntimeConfigTool(model.Name()), // Self-Config
+		tools.GetRuntimeLogsTool(logPath),        // Self-Logs
+		tools.NewRecallTool(memorySvc),           // Direct memory access for LIVIVA
+		tools.NewRememberTool(memorySvc),         // Direct memory write for LIVIVA
+		agenttool.New(clientAdmin, nil),          // name: "client_admin"
+		agenttool.New(analyst, nil),              // name: "analyst"
 	}
 
 	if voiceOutput != nil {
