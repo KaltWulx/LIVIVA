@@ -164,6 +164,17 @@ func Run(addr string) {
 			case *api.ServerMessage_Text:
 				p.Send(serverMsg{text: pld.Text})
 			case *api.ServerMessage_SystemLog:
+				// Intercept busy/ready control signals
+				if pld.SystemLog == "[BUSY]" {
+					voice.SetBusy(true)
+					p.Send(busyMsg(true))
+					continue
+				}
+				if pld.SystemLog == "[READY]" {
+					voice.SetBusy(false)
+					p.Send(busyMsg(false))
+					continue
+				}
 				p.Send(serverMsg{text: pld.SystemLog, isSystem: true})
 			case *api.ServerMessage_SpeakText:
 				p.Send(serverMsg{text: pld.SpeakText, isVoice: true})

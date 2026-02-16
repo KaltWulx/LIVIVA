@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -242,19 +241,100 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 
 	// Buffer for pending artifacts (images/files) to be attached to the next text message
 	var pendingParts []*genai.Part
+	var pendingMu sync.Mutex
+
+	// --- Serialized Agent Turn Worker ---
+	// A buffered channel ensures text messages are queued (not dropped)
+	// while the agent is processing a previous turn.
+	type agentMsg struct {
+		text        string
+		attachments []*genai.Part
+	}
+	textMsgCh := make(chan agentMsg, 10)
+
+	// Single worker goroutine processes one agent turn at a time.
+	// ToolResponse and Artifact messages continue flowing in the main recv loop.
+	go func() {
+		for am := range textMsgCh {
+			// Signal client: agent is busy
+			safe.Send(&api.ServerMessage{
+				Payload: &api.ServerMessage_SystemLog{
+					SystemLog: "[BUSY]",
+				},
+			})
+
+			// Construct message with text AND attachments
+			msgParts := []*genai.Part{{Text: am.text}}
+			msgParts = append(msgParts, am.attachments...)
+
+			msg := &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: msgParts,
+			}
+
+			// Run the agent turn and stream events back (synchronous within this goroutine)
+			for event, err := range r.Run(stream.Context(), userId, sessionId, msg, agent.RunConfig{}) {
+				if err != nil {
+					log.Printf("Agent Error: %v", err)
+					continue
+				}
+
+				if event.LLMResponse.Content != nil {
+					for _, part := range event.LLMResponse.Content.Parts {
+						if part.Text != "" {
+							safe.Send(&api.ServerMessage{
+								Payload: &api.ServerMessage_Text{
+									Text: part.Text,
+								},
+							})
+						}
+					}
+				}
+
+				// Only send metrics and final updates on non-partial events
+				if !event.LLMResponse.Partial && event.LLMResponse.UsageMetadata != nil {
+					usage := event.LLMResponse.UsageMetadata
+					percentage := int32((usage.TotalTokenCount * 100) / 128000)
+					if percentage > 100 {
+						percentage = 100
+					}
+
+					safe.Send(&api.ServerMessage{
+						Payload: &api.ServerMessage_Metrics{
+							Metrics: &api.Metrics{
+								PromptTokens:      usage.PromptTokenCount,
+								CompletionTokens:  usage.CandidatesTokenCount,
+								TotalTokens:       usage.TotalTokenCount,
+								ContextPercentage: percentage,
+							},
+						},
+					})
+				}
+			}
+
+			// Signal client: agent is ready for new input
+			safe.Send(&api.ServerMessage{
+				Payload: &api.ServerMessage_SystemLog{
+					SystemLog: "[READY]",
+				},
+			})
+		}
+	}()
 
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF {
+			close(textMsgCh)
 			return nil
 		}
 		if err != nil {
+			close(textMsgCh)
 			return err
 		}
 
 		switch p := in.Payload.(type) {
 		case *api.ClientMessage_ToolResponse:
-			// Route response to the waiting dispatcher
+			// Route response to the waiting dispatcher (must stay in main loop)
 			resp := p.ToolResponse
 			log.Printf("Received Tool Response for ID: %s", resp.Id)
 			tDispatcher.mu.Lock()
@@ -271,7 +351,6 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 			art := p.SaveArtifactRequest
 			log.Printf("Received Artifact Upload: %s", art.Filename)
 
-			// Create Part for Model
 			part := &genai.Part{
 				InlineData: &genai.Blob{
 					MIMEType: art.MimeType,
@@ -279,7 +358,6 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 				},
 			}
 
-			// Save to persistent storage
 			resp, err := s.artifactService.Save(stream.Context(), &artifact.SaveRequest{
 				AppName:   "LIVIVA",
 				UserID:    userId,
@@ -303,71 +381,32 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 					},
 				})
 
-				// Add to pending parts for the next message
+				pendingMu.Lock()
 				pendingParts = append(pendingParts, part)
+				pendingMu.Unlock()
 			}
 
 		case *api.ClientMessage_Text:
 			log.Printf("Processing Request: %s", p.Text)
 
-			// Copy pending parts to avoid race conditions with the goroutine
+			// Snapshot and clear pending attachments
+			pendingMu.Lock()
 			currentParts := make([]*genai.Part, len(pendingParts))
 			copy(currentParts, pendingParts)
-			pendingParts = nil // Clear for future messages
+			pendingParts = nil
+			pendingMu.Unlock()
 
-			// Handle Agent execution in a separate goroutine
-			go func(userText string, attachments []*genai.Part) {
-				// Construct message with text AND attachments
-				msgParts := []*genai.Part{{Text: userText}}
-				msgParts = append(msgParts, attachments...)
-
-				msg := &genai.Content{
-					Role:  genai.RoleUser,
-					Parts: msgParts,
-				}
-
-				// Run the agent turn and stream events back
-				for event, err := range r.Run(context.Background(), userId, sessionId, msg, agent.RunConfig{}) {
-					if err != nil {
-						log.Printf("Agent Error: %v", err)
-						continue
-					}
-
-					if event.LLMResponse.Content != nil {
-						for _, part := range event.LLMResponse.Content.Parts {
-							if part.Text != "" {
-								safe.Send(&api.ServerMessage{
-									Payload: &api.ServerMessage_Text{
-										Text: part.Text,
-									},
-								})
-							}
-						}
-						if event.LLMResponse.UsageMetadata != nil {
-							usage := event.LLMResponse.UsageMetadata
-							// Simple context percentage calculation
-							percentage := int32((usage.TotalTokenCount * 100) / 128000)
-							if percentage > 100 {
-								percentage = 100
-							}
-
-							safe.Send(&api.ServerMessage{
-								Payload: &api.ServerMessage_Metrics{
-									Metrics: &api.Metrics{
-										PromptTokens:      usage.PromptTokenCount,
-										CompletionTokens:  usage.CandidatesTokenCount,
-										TotalTokens:       usage.TotalTokenCount,
-										ContextPercentage: percentage,
-									},
-								},
-							})
-						}
-					}
-				}
-
-				// NOTE: Automatic memory ingestion is deactivated to prevent history pollution.
-				// Explicit memory is now managed via tools or user: state.
-			}(p.Text, currentParts)
+			// Queue for the serialized worker (non-blocking with buffer)
+			select {
+			case textMsgCh <- agentMsg{text: p.Text, attachments: currentParts}:
+			default:
+				log.Printf("Warning: Agent message queue full, dropping message: %s", p.Text)
+				safe.Send(&api.ServerMessage{
+					Payload: &api.ServerMessage_SystemLog{
+						SystemLog: "⚠ Message dropped: agent is busy processing. Please wait.",
+					},
+				})
+			}
 		}
 	}
 }

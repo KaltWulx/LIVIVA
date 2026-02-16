@@ -21,6 +21,12 @@ type VoiceService struct {
 	running bool
 	mu      sync.Mutex
 	program *tea.Program
+
+	// Busy state: buffer voice input while agent is processing
+	busy     bool
+	voiceBuf []string
+	stream   api.LivivaService_ChatSessionClient
+	sendMu   *sync.Mutex
 }
 
 func NewVoiceService() *VoiceService {
@@ -37,6 +43,37 @@ func (s *VoiceService) IsRunning() bool {
 	return s.running
 }
 
+// SetBusy toggles the busy state. When transitioning from busy→ready, flushes buffered voice input.
+func (s *VoiceService) SetBusy(busy bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	wasBusy := s.busy
+	s.busy = busy
+
+	// Flush buffer when transitioning from busy→ready
+	if wasBusy && !busy && len(s.voiceBuf) > 0 {
+		combined := strings.Join(s.voiceBuf, " ")
+		s.voiceBuf = nil
+
+		// Send the buffered text
+		if s.stream != nil && s.sendMu != nil && combined != "" {
+			if s.program != nil {
+				s.program.Send(serverMsg{text: combined, isUser: true})
+			}
+			go func() {
+				s.sendMu.Lock()
+				defer s.sendMu.Unlock()
+				s.stream.Send(&api.ClientMessage{
+					Payload: &api.ClientMessage_Text{
+						Text: combined,
+					},
+				})
+			}()
+		}
+	}
+}
+
 func (s *VoiceService) Start(stream api.LivivaService_ChatSessionClient, sendMu *sync.Mutex) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -44,6 +81,9 @@ func (s *VoiceService) Start(stream api.LivivaService_ChatSessionClient, sendMu 
 	if s.running {
 		return
 	}
+
+	s.stream = stream
+	s.sendMu = sendMu
 
 	// Resolution of bins: Check .venv first, then PATH
 	cwd, _ := os.Getwd()
@@ -118,6 +158,20 @@ func (s *VoiceService) Start(stream api.LivivaService_ChatSessionClient, sendMu 
 					}
 					continue
 				}
+
+				// Check busy state
+				s.mu.Lock()
+				isBusy := s.busy
+				if isBusy {
+					// Buffer the transcription for later
+					s.voiceBuf = append(s.voiceBuf, transcribed)
+					s.mu.Unlock()
+					if s.program != nil {
+						s.program.Send(serverMsg{text: "⏳ Buffered: " + transcribed, isSystem: true})
+					}
+					continue
+				}
+				s.mu.Unlock()
 
 				if s.program != nil {
 					s.program.Send(serverMsg{text: transcribed, isUser: true})
