@@ -18,10 +18,10 @@ import (
 // NewCoordinator creates the root agent for LIVIVA
 func NewCoordinator(model model.LLM, voiceOutput io.Writer, uiLogger io.Writer, dispatcher tools.RemoteDispatcher, memorySvc memory.Service, mcpHost *mcp.Host) (agent.Agent, error) {
 	// Initialize specialized sub-agents (Internal Specialists)
-	// Pass dispatcher to SysAdmin for client-side execution
-	sysAdmin, err := NewSysAdminAgent(model, memorySvc, dispatcher)
+	// Pass dispatcher to ClientAdmin for client-side execution
+	clientAdmin, err := NewClientAdminAgent(model, memorySvc, dispatcher)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create sysadmin agent: %w", err)
+		return nil, fmt.Errorf("failed to create client_admin agent: %w", err)
 	}
 
 	analyst, err := NewAnalystAgent(model, memorySvc, mcpHost.GetToolsets())
@@ -39,9 +39,11 @@ CRITICAL PROTOCOL: "One Mind, Many Hands"
 - You have absolute control and responsibility for all actions.
 
 YOUR INTERNAL TOOLS (Private Specialists):
-1.  **sysadmin**: Use this tool for managing the user's local machine (CLIENT).
-    *   Mandatory for checking files, running commands, or getting system info.
-2.  **analyst**: Use this tool for deep research and memory recall/synthesis.
+1.  **client_admin**: Use this tool for managing the USER'S LOCAL MACHINE (CLIENT).
+    *   Mandatory for checking files, running commands, or getting CLIENT system info.
+2.  **server_context**: Use this tool to inspect YOUR OWN runtime environment (LIVIVA SERVER).
+    *   Use this for self-diagnosis or understanding where you are hosted.
+3.  **analyst**: Use this tool for deep research and memory recall/synthesis.
     *   Mandatory for complex questions, finding past facts, or web research (e.g., via MCP ddgs).
 
 BEHAVIOR:
@@ -52,10 +54,11 @@ BEHAVIOR:
 
 	// 2. Configure Tools
 	toolsList := []tool.Tool{
-		tools.GetRemoteSystemTool(dispatcher), // Basic client info
+		tools.GetRemoteSystemTool(dispatcher), // Basic client info (quick check)
+		tools.GetServerSystemTool(),           // LIVIVA Server info (self-check)
 		tools.NewRecallTool(memorySvc),        // Direct memory access for LIVIVA
 		tools.NewRememberTool(memorySvc),      // Direct memory write for LIVIVA
-		agenttool.New(sysAdmin, nil),          // name: "sysadmin"
+		agenttool.New(clientAdmin, nil),       // name: "client_admin"
 		agenttool.New(analyst, nil),           // name: "analyst"
 	}
 

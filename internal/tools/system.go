@@ -10,12 +10,12 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-// GetSystemTool returns the 'get_system_info' tool
-func GetSystemTool() tool.Tool {
+// GetServerSystemTool returns the 'get_server_info' tool
+func GetServerSystemTool() tool.Tool {
 	t, err := functiontool.New(
 		functiontool.Config{
-			Name:        "get_system_info",
-			Description: "Returns basic system information (OS, Arch, Hostname).",
+			Name:        "get_server_info",
+			Description: "Returns basic system information (OS, Arch, Hostname) of the LIVIVA SERVER (where the agent runs).",
 		},
 		getSystemInfo,
 	)
