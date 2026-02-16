@@ -117,6 +117,7 @@ func Run(addr string) {
 		execMu         sync.Mutex
 		activeExecutor *executor.Executor
 		toolInputCh    = make(chan string, 10)
+		toolRequestCh  = make(chan *api.ToolRequest, 100) // Buffer for incoming tool requests
 	)
 
 	// Input Router
@@ -127,6 +128,17 @@ func Run(addr string) {
 				_ = activeExecutor.WriteInput([]byte(input))
 			}
 			execMu.Unlock()
+		}
+	}()
+
+	// Tool Execution Worker (Serialized)
+	// This ensures that only ONE tool executes at a time, preventing race conditions
+	// on the PTY and Input Router.
+	go func() {
+		for req := range toolRequestCh {
+			// Pass shared state pointers
+			// Executed synchronously by this worker
+			handleToolRequest(stream, req, &execMu, &activeExecutor)
 		}
 	}()
 
@@ -156,8 +168,13 @@ func Run(addr string) {
 				p.Send(serverMsg{text: pld.SpeakText, isVoice: true})
 				go voice.Speak(pld.SpeakText)
 			case *api.ServerMessage_ToolRequest:
-				// Pass shared state pointers
-				go handleToolRequest(stream, pld.ToolRequest, &execMu, &activeExecutor)
+				// Push to queue for serialized execution
+				select {
+				case toolRequestCh <- pld.ToolRequest:
+				default:
+					log.Printf("Tool request queue full, dropping request: %s", pld.ToolRequest.Id)
+					p.Send(errMsg(fmt.Errorf("tool queue full, dropped request %s", pld.ToolRequest.Id)))
+				}
 			case *api.ServerMessage_Artifact:
 				// Handle artifact download if needed
 			case *api.ServerMessage_Metrics:
