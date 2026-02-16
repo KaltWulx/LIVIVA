@@ -119,10 +119,30 @@ func (w *voiceWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// uiLogger sends text as system logs to the client
+type uiLogger struct {
+	safeStream *safeStream
+}
+
+func (l *uiLogger) Write(p []byte) (n int, err error) {
+	text := string(p)
+	if text == "" {
+		return 0, nil
+	}
+	err = l.safeStream.Send(&api.ServerMessage{
+		Payload: &api.ServerMessage_SystemLog{
+			SystemLog: text,
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
 func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) error {
 	log.Println("New Client Connected")
 
-	// Load or create persistent Session ID
 	// Load or create persistent Session ID
 	// sessionFile := "session.id" // Local to current directory for now, or use user home
 	// Better to use user home to be safe
@@ -161,8 +181,9 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 	// Wrapper for thread-safe sending
 	safe := &safeStream{stream: stream}
 
-	// dedicated writer for voice tool
+	// dedicated writers for tools and UI logging
 	vWriter := &voiceWriter{safeStream: safe}
+	uLogger := &uiLogger{safeStream: safe}
 
 	// dedicated dispatcher for tools
 	tDispatcher := &toolDispatcher{safeStream: safe, responses: make(map[string]chan string)}
@@ -194,7 +215,7 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 		}
 	}
 
-	coord, err := agents.NewCoordinator(s.llmModel, vWriter, tDispatcher, memorySvc, mcpHost)
+	coord, err := agents.NewCoordinator(s.llmModel, vWriter, uLogger, tDispatcher, memorySvc, mcpHost)
 	if err != nil {
 		return fmt.Errorf("failed to create coordinator: %w", err)
 	}
