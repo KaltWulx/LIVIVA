@@ -480,7 +480,7 @@ func (m *OpenAIModel) prepareRequest(req *model.LLMRequest, stream bool) ([]byte
 				Function: OpenAIFunction{
 					Name:        fn.Name,
 					Description: fn.Description,
-					Parameters:  fn.Parameters,
+					Parameters:  sanitizeSchema(fn.Parameters),
 				},
 			})
 		}
@@ -521,6 +521,74 @@ type OpenAIToolCall struct {
 	ID       string             `json:"id"`
 	Type     string             `json:"type"`
 	Function OpenAIFunctionCall `json:"function"`
+}
+
+// sanitizeSchema recursively converts schema types to lowercase and ensures root is an object
+// to comply with OpenAI's strict JSON Schema requirements.
+func sanitizeSchema(schema any) any {
+	if schema == nil {
+		return map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		}
+	}
+
+	// Marshal to JSON and back to map[string]any for easy manipulation
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return schema
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return schema
+	}
+
+	// Recursive helper
+	var walk func(v any) any
+	walk = func(v any) any {
+		switch obj := v.(type) {
+		case map[string]any:
+			newMap := make(map[string]any)
+			for k, val := range obj {
+				if k == "type" && val != nil {
+					if s, ok := val.(string); ok {
+						newMap[k] = strings.ToLower(s)
+						continue
+					}
+				}
+				newMap[k] = walk(val)
+			}
+			return newMap
+		case []any:
+			newSlice := make([]any, len(obj))
+			for i, val := range obj {
+				newSlice[i] = walk(val)
+			}
+			return newSlice
+		default:
+			return v
+		}
+	}
+
+	sanitized := walk(m)
+
+	// Ensure top-level is an object
+	if sm, ok := sanitized.(map[string]any); ok {
+		if t, ok := sm["type"].(string); ok && t != "object" {
+			// Wrap it: { type: object, properties: { input: <original> } }
+			return map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"input": sm,
+				},
+				"required": []string{"input"},
+			}
+		}
+		return sm
+	}
+
+	return sanitized
 }
 
 type OpenAIFunctionCall struct {
