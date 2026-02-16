@@ -156,4 +156,20 @@ var (
 	StyleKeyBind = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(ColorAccent)).
 			Bold(true)
+
+	// Separator between conversation turns
+	StyleSeparator = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(ColorBorder)).
+			MarginTop(1).
+			MarginBottom(1)
+
+	// Timestamp for messages
+	StyleTimestamp = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(ColorTextMuted)).
+			Italic(true)
+
+	// Spinner / Thinking indicator
+	StyleSpinner = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(ColorRainGreen)).
+			Bold(true)
 )

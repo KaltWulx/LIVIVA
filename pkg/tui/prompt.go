@@ -15,14 +15,17 @@ type Prompt struct {
 
 func NewPrompt() Prompt {
 	ta := textarea.New()
-	ta.Placeholder = "Ask anything... (Enter to send, Alt+Enter for new line)"
+	ta.Placeholder = "Message LIVIVA... (Enter to send, Alt+Enter for newline)"
 	ta.Focus()
 	ta.Prompt = " "  // We'll handle the prompt rendering via styles
 	ta.CharLimit = 0 // Unlimited
 	ta.SetWidth(50)  // Will be resized
 	ta.SetHeight(1)  // Auto-expanding
 	ta.ShowLineNumbers = false
-	ta.KeyMap.InsertNewline.SetEnabled(false) // We handle this manually if needed
+
+	// Enter submits (handled by tui.go), Alt+Enter inserts newline
+	ta.KeyMap.InsertNewline.SetEnabled(true)
+	// Keep InsertNewline bound to alt+enter (default in bubbles textarea)
 
 	// Styling
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()

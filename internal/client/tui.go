@@ -1,12 +1,14 @@
 package client
 
 import (
+	"fmt"
 	"strings"
-
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	executor "github.com/kalt/liviva/internal/client/exec"
 	"github.com/kalt/liviva/pkg/tui"
@@ -47,7 +49,8 @@ type serverMsg struct {
 
 type recordingMsg bool
 type playingMsg bool
-type executingMsg bool // New message type
+type executingMsg bool
+type busyMsg bool
 
 type metricsMsg struct {
 	promptTokens     int32
@@ -56,24 +59,69 @@ type metricsMsg struct {
 	contextPct       int32
 }
 
+// finishAssistantMsg is sent after a debounce timeout to seal the current assistant message
+type finishAssistantMsg struct{}
+
 type errMsg error
 
+// --- Glamour Renderer (singleton) ---
+var mdRenderer *glamour.TermRenderer
+
+func getMarkdownRenderer(width int) *glamour.TermRenderer {
+	if mdRenderer != nil {
+		return mdRenderer
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		// Fallback: will render without glamour
+		return nil
+	}
+	mdRenderer = r
+	return mdRenderer
+}
+
+func renderMarkdown(text string, width int) string {
+	r := getMarkdownRenderer(width)
+	if r == nil {
+		return text
+	}
+	out, err := r.Render(text)
+	if err != nil {
+		return text
+	}
+	return strings.TrimRight(out, "\n")
+}
+
+// --- Chat Model ---
+
 type ChatModel struct {
-	viewport    viewport.Model
-	messages    []Message // Changed from []string
-	prompt      tui.Prompt
-	sender      func(string) tea.Cmd
-	err         error
+	viewport viewport.Model
+	messages []Message
+	prompt   tui.Prompt
+	sender   func(string) tea.Cmd
+	err      error
+
+	// Voice state
 	voiceActive bool
 	isRecording bool
 	isPlaying   bool
 
-	// New TUI components
+	// TUI components
 	dialogs *tui.DialogManager
 	palette *tui.CommandPalette
 	metrics *tui.MetricsModel
+	spinner spinner.Model
 	width   int
 	height  int
+
+	// Streaming accumulation
+	pendingAssistant *Message  // Current assistant message being accumulated
+	lastChunkTime    time.Time // Time of last received chunk (for debounce)
+	waitingResponse  bool      // True while waiting for assistant reply
+	serverBusy       bool      // True while server is processing an agent turn
 
 	// Execution State
 	executing   bool
@@ -82,7 +130,6 @@ type ChatModel struct {
 }
 
 func NewChatModel(sender func(string) tea.Cmd, toolInputCh chan string) ChatModel {
-	// Use new Prompt
 	prmt := tui.NewPrompt()
 
 	vp := viewport.New(30, 5)
@@ -93,6 +140,11 @@ func NewChatModel(sender func(string) tea.Cmd, toolInputCh chan string) ChatMode
 
 	dm := tui.NewDialogManager()
 	metrics := tui.NewMetricsModel()
+
+	// Spinner
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = tui.StyleSpinner
 
 	return ChatModel{
 		prompt:      prmt,
@@ -105,13 +157,30 @@ func NewChatModel(sender func(string) tea.Cmd, toolInputCh chan string) ChatMode
 		palette:     p,
 		dialogs:     dm,
 		metrics:     metrics,
+		spinner:     sp,
 		executing:   false,
 		toolInputCh: toolInputCh,
 	}
 }
 
 func (m ChatModel) Init() tea.Cmd {
-	return m.prompt.Init()
+	return tea.Batch(m.prompt.Init(), m.spinner.Tick)
+}
+
+// sealPendingAssistant finalizes the pending assistant message and adds it to the message list
+func (m *ChatModel) sealPendingAssistant() {
+	if m.pendingAssistant != nil {
+		m.messages = append(m.messages, *m.pendingAssistant)
+		m.pendingAssistant = nil
+		m.waitingResponse = false
+	}
+}
+
+// scheduleFinish returns a Cmd that sends finishAssistantMsg after a debounce delay
+func scheduleFinish() tea.Cmd {
+	return tea.Tick(600*time.Millisecond, func(t time.Time) tea.Msg {
+		return finishAssistantMsg{}
+	})
 }
 
 func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -119,6 +188,7 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pCmd  tea.Cmd
 		vpCmd tea.Cmd
 		cmd   tea.Cmd
+		cmds  []tea.Cmd
 	)
 
 	// 1. Handle Window Size
@@ -127,12 +197,15 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		headerHeight := 2                    // Minimal header
-		inputHeight := m.prompt.Height() + 2 // + borders/padding
+		headerHeight := 2
+		inputHeight := m.prompt.Height() + 2
 
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height - headerHeight - inputHeight
 		m.prompt.SetWidth(msg.Width - 4)
+
+		// Reset glamour renderer on resize
+		mdRenderer = nil
 	}
 
 	// 2. Handle Dialogs
@@ -154,12 +227,11 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// 4. Normal Interaction
-	// Update Prompt
+	// 4. Update Prompt
 	cmd = m.prompt.Update(msg)
 	pCmd = cmd
 
-	// Check if Prompt height changed and adjust Viewport
+	// Adjust viewport height for dynamic prompt
 	headerHeight := 2
 	inputHeight := m.prompt.Height() + 2
 	newViewportHeight := m.height - headerHeight - inputHeight
@@ -170,21 +242,16 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Height = newViewportHeight
 	}
 
-	// Update Viewport (with new height)
+	// 5. Update Viewport
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
+	// 6. Handle specific messages
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 		case tea.KeyEnter:
-			// Check for Alt+Enter (if supported by terminal) or just check for escaping?
-			// Bubbles textarea handles Ctrl+J as newline if configured, but we disabled valid newlines in Enter for now?
-			// Actually, we want Enter to submit, and maybe Alt+Enter to insert newline.
-			// Standard bubbles behavior: Shift+Enter or Ctrl+J often triggers newline if InsertNewline is set.
-			// But we disabled InsertNewline in NewPrompt keymap.
-
 			val := strings.TrimSpace(m.prompt.Value())
 			if val == "" {
 				break
@@ -193,18 +260,19 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// If executing, route input to the process
 			if m.executing {
-				// Don't show in chat (PTY will echo if needed, or hide if password)
-				// Send to executor channel
 				select {
-				case m.toolInputCh <- val + "\n": // Add newline as standard input usually expects it
+				case m.toolInputCh <- val + "\n":
 				default:
 				}
 				break
 			}
 
+			// Seal any pending assistant message before user submits
+			m.sealPendingAssistant()
+
 			// Create User Message
 			userMsg := Message{
-				ID:   time.Now().String(), // Simple ID
+				ID:   fmt.Sprintf("user-%d", time.Now().UnixNano()),
 				Role: MsgUser,
 				Parts: []MessagePart{
 					{Type: "text", Content: val},
@@ -212,42 +280,73 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Time: time.Now(),
 			}
 			m.messages = append(m.messages, userMsg)
+			m.waitingResponse = true
 
 			cmd = m.sender(val)
+			cmds = append(cmds, cmd)
 
-			// Render all messages
-			rendered := m.renderMessages()
-			m.viewport.SetContent(rendered)
-			m.viewport.GotoBottom()
+			m.refreshViewport()
 		}
 
 	case serverMsg:
-		// Create Server Message
-		var role MessageType
-		if msg.isSystem {
-			role = MsgSystem
-		} else if msg.isVoice {
-			role = MsgVoice
-		} else if msg.isUser {
-			role = MsgUser
+		if msg.isSystem || msg.isVoice || msg.isUser {
+			// Non-assistant messages: seal pending, add directly
+			m.sealPendingAssistant()
+
+			var role MessageType
+			switch {
+			case msg.isSystem:
+				role = MsgSystem
+			case msg.isVoice:
+				role = MsgVoice
+			case msg.isUser:
+				role = MsgUser
+			}
+
+			svrMsg := Message{
+				ID:   fmt.Sprintf("sys-%d", time.Now().UnixNano()),
+				Role: role,
+				Parts: []MessagePart{
+					{Type: "text", Content: msg.text},
+				},
+				Time: time.Now(),
+			}
+			m.messages = append(m.messages, svrMsg)
 		} else {
-			role = MsgAssistant
+			// Assistant text: accumulate into pending message
+			if m.pendingAssistant == nil {
+				m.pendingAssistant = &Message{
+					ID:   fmt.Sprintf("asst-%d", time.Now().UnixNano()),
+					Role: MsgAssistant,
+					Parts: []MessagePart{
+						{Type: "text", Content: msg.text},
+					},
+					Time: time.Now(),
+				}
+			} else {
+				// Append to last text part
+				lastIdx := len(m.pendingAssistant.Parts) - 1
+				if lastIdx >= 0 && m.pendingAssistant.Parts[lastIdx].Type == "text" {
+					m.pendingAssistant.Parts[lastIdx].Content += msg.text
+				} else {
+					m.pendingAssistant.Parts = append(m.pendingAssistant.Parts, MessagePart{
+						Type:    "text",
+						Content: msg.text,
+					})
+				}
+			}
+			m.lastChunkTime = time.Now()
+			// Schedule a debounce to seal the message after streaming stops
+			cmds = append(cmds, scheduleFinish())
 		}
+		m.refreshViewport()
 
-		svrMsg := Message{
-			ID:   time.Now().String(),
-			Role: role,
-			Parts: []MessagePart{
-				{Type: "text", Content: msg.text},
-			},
-			Time: time.Now(),
+	case finishAssistantMsg:
+		// Only seal if enough time has passed since the last chunk
+		if m.pendingAssistant != nil && time.Since(m.lastChunkTime) >= 500*time.Millisecond {
+			m.sealPendingAssistant()
+			m.refreshViewport()
 		}
-
-		m.messages = append(m.messages, svrMsg)
-
-		rendered := m.renderMessages()
-		m.viewport.SetContent(rendered)
-		m.viewport.GotoBottom()
 
 	case metricsMsg:
 		m.metrics.Update(tui.MetricsMsg{
@@ -261,6 +360,15 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isRecording = bool(msg)
 	case playingMsg:
 		m.isPlaying = bool(msg)
+	case busyMsg:
+		m.serverBusy = bool(msg)
+		if m.serverBusy {
+			m.waitingResponse = true
+		} else {
+			m.waitingResponse = false
+		}
+		m.refreshViewport()
+
 	case executingMsg:
 		m.executing = bool(msg)
 		if m.executing {
@@ -270,70 +378,98 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prompt.SetPlaceholder("Message LIVIVA...")
 			m.prompt.Focus()
 		}
+
+	case spinner.TickMsg:
+		m.spinner, cmd = m.spinner.Update(msg)
+		cmds = append(cmds, cmd)
+
 	case errMsg:
 		m.err = msg
 		return m, tea.Quit
 	}
 
-	return m, tea.Batch(pCmd, vpCmd, cmd)
+	cmds = append(cmds, pCmd, vpCmd)
+	return m, tea.Batch(cmds...)
 }
 
-// renderMessages converts the structured messages into a string for the viewport
+// refreshViewport renders all messages and updates the viewport content
+func (m *ChatModel) refreshViewport() {
+	rendered := m.renderMessages()
+	m.viewport.SetContent(rendered)
+	m.viewport.GotoBottom()
+}
+
+// renderMessages converts the structured messages into a styled string for the viewport
 func (m ChatModel) renderMessages() string {
 	var rendered []string
 
-	// Ensure we have enough width
 	maxWidth := m.width - 6
 	if maxWidth < 20 {
 		maxWidth = 20
 	}
 
-	for _, msg := range m.messages {
+	// Collect all messages + the pending assistant (if any)
+	allMessages := make([]Message, len(m.messages))
+	copy(allMessages, m.messages)
+	if m.pendingAssistant != nil {
+		allMessages = append(allMessages, *m.pendingAssistant)
+	}
+
+	lastRole := MessageType(-1)
+
+	for _, msg := range allMessages {
 		var block string
+
+		// Add separator between user→assistant transitions
+		if lastRole == MsgAssistant && msg.Role == MsgUser {
+			sep := tui.StyleSeparator.Width(maxWidth).Render(strings.Repeat("─", maxWidth-4))
+			rendered = append(rendered, sep)
+		}
+
+		timestamp := tui.StyleTimestamp.Render(msg.Time.Format("15:04"))
+
 		switch msg.Role {
 		case MsgUser:
-			// OpenCode User Style:
-			// Header (You) + Content Block with Left Border
-			header := tui.StyleUserHeader.Render("You")
+			header := lipgloss.JoinHorizontal(lipgloss.Center,
+				tui.StyleUserHeader.Render("You"),
+				" ",
+				timestamp,
+			)
 
-			// Content is rendered inside the block style
 			content := tui.StyleBase.Width(maxWidth - 2).Render(msg.Parts[0].Content)
 			body := tui.StyleUserMessage.Width(maxWidth).Render(content)
-
-			// Join vertical
 			block = lipgloss.JoinVertical(lipgloss.Left, header, body)
 
 		case MsgAssistant:
-			// OpenCode Assistant Style:
-			// Header (LIVIVA) + Clean blocks
 			var parts []string
 
-			// Header with identity and metadata (e.g. model)
 			headerText := "LIVIVA"
 			if msg.Model != "" {
 				headerText += " · " + msg.Model
 			}
-			header := tui.StyleAssistantHeader.Render(headerText)
+			header := lipgloss.JoinHorizontal(lipgloss.Center,
+				tui.StyleAssistantHeader.Render(headerText),
+				" ",
+				timestamp,
+			)
 			parts = append(parts, header)
 
 			for _, p := range msg.Parts {
-				if p.Type == "thinking" {
-					// Thinking block
+				switch p.Type {
+				case "thinking":
 					think := tui.StyleThinking.Width(maxWidth).Render(p.Content)
 					parts = append(parts, think)
-				} else if p.Type == "tool" {
-					// Tool block
+				case "tool":
 					tool := tui.StyleToolBlock.Width(maxWidth).Render("⚙ " + p.Content)
 					parts = append(parts, tool)
-				} else {
-					// Standard Text
-					// Render text cleanly with correct width constraints
-					txt := tui.StyleAssistantBlock.Width(maxWidth).Render(p.Content)
+				default:
+					// Render markdown via glamour
+					rendered := renderMarkdown(p.Content, maxWidth-4)
+					txt := tui.StyleAssistantBlock.Width(maxWidth).Render(rendered)
 					parts = append(parts, txt)
 				}
 			}
 
-			// Footer handling if needed (e.g. Duration)
 			if msg.Duration > 0 {
 				meta := tui.StyleMeta.Render(msg.Duration.String())
 				parts = append(parts, meta)
@@ -345,16 +481,26 @@ func (m ChatModel) renderMessages() string {
 
 		case MsgSystem:
 			block = lipgloss.NewStyle().Padding(0, 2).Width(maxWidth).Render(
-				tui.StyleMuted.Render("System: " + msg.Parts[0].Content),
+				tui.StyleMuted.Render("⟫ " + msg.Parts[0].Content),
 			)
 		case MsgVoice:
 			block = lipgloss.NewStyle().Padding(0, 2).Width(maxWidth).Render(
-				tui.StyleSuccess.Render("Voice: " + msg.Parts[0].Content),
+				tui.StyleSuccess.Render("🔊 " + msg.Parts[0].Content),
 			)
 		}
+
 		if block != "" {
 			rendered = append(rendered, block)
 		}
+		lastRole = msg.Role
+	}
+
+	// Add spinner if waiting for response
+	if m.waitingResponse && m.pendingAssistant == nil {
+		spinnerBlock := lipgloss.NewStyle().Padding(0, 2).Render(
+			m.spinner.View() + tui.StyleMuted.Render(" LIVIVA is thinking..."),
+		)
+		rendered = append(rendered, spinnerBlock)
 	}
 
 	return strings.Join(rendered, "\n")
@@ -365,26 +511,22 @@ func (m ChatModel) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.dialogs.View())
 	}
 
-	// Safe Width fallback
 	viewWidth := m.width
 	if viewWidth <= 0 {
 		viewWidth = 80
 	}
 
-	// 1. Header (OpenCode Minimalist)
-	// Left: Title
+	// 1. Header
 	title := tui.StyleHeaderTitle.Render("# Session")
 
-	// Right: Metrics + Status
 	status := ""
 	if m.isRecording {
-		status = tui.StyleError.Render("REC")
+		status = tui.StyleError.Render("● REC")
 	} else if m.isPlaying {
-		status = tui.StyleSuccess.Render("PLAY")
+		status = tui.StyleSuccess.Render("▶ PLAY")
 	}
-	metrics := m.metrics.View() // Use the metrics component view (make sure existing view style matches)
+	metrics := m.metrics.View()
 
-	// Join
 	headerContent := lipgloss.JoinHorizontal(lipgloss.Center,
 		title,
 		lipgloss.PlaceHorizontal(viewWidth-lipgloss.Width(title)-lipgloss.Width(metrics)-lipgloss.Width(status)-4, lipgloss.Right, status),
@@ -397,21 +539,17 @@ func (m ChatModel) View() string {
 	chatView := m.viewport.View()
 
 	// 3. Input
-	// We use the prompt's View which includes the textarea
-	// Wrap it in container style
 	inputView := tui.StyleInputContainer.Width(viewWidth - 2).Render(m.prompt.View())
 	if m.executing {
-		inputView = tui.StyleInputFocused.BorderForeground(lipgloss.Color("208")).Width(viewWidth - 2).Render(m.prompt.View()) // Orange border for Exec
-		m.prompt.SetPlaceholder("Interact with process...")
+		inputView = tui.StyleInputFocused.BorderForeground(lipgloss.Color("208")).Width(viewWidth - 2).Render(m.prompt.View())
 	} else if m.prompt.Focused() {
 		inputView = tui.StyleInputFocused.Width(viewWidth - 2).Render(m.prompt.View())
-		m.prompt.SetPlaceholder("Message LIVIVA...")
 	}
 
-	// Combine components
+	// 4. Footer
 	footerText := tui.StyleInputFooter.Width(viewWidth).Render(
-		tui.StyleKeyBind.Render("ctrl+t") + " variants  " +
-			tui.StyleKeyBind.Render("tab") + " agents  " +
+		tui.StyleKeyBind.Render("enter") + " send  " +
+			tui.StyleKeyBind.Render("alt+enter") + " newline  " +
 			tui.StyleKeyBind.Render("ctrl+p") + " commands",
 	)
 
@@ -472,7 +610,6 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Route based on current view
 	switch m.router.CurrentView {
 	case tui.ViewHome:
-		// For now, Home is Chat
 		newChat, cmd := m.chat.Update(msg)
 		if c, ok := newChat.(ChatModel); ok {
 			m.chat = c
