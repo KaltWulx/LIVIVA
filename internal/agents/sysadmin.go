@@ -39,7 +39,7 @@ BEHAVIOR:
 - If a command fails, try to diagnose why (permissions, missing package) before giving up.`,
 		Tools: []tool.Tool{
 			tools.GetRemoteExecuteCommandTool(dispatcher),
-			tools.GetSystemTool(),
+			tools.GetRemoteSystemTool(dispatcher),
 			tools.NewRecallTool(memorySvc),
 			tools.NewRememberTool(memorySvc),
 		},

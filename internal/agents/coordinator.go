@@ -52,11 +52,11 @@ BEHAVIOR:
 
 	// 2. Configure Tools
 	toolsList := []tool.Tool{
-		tools.GetSystemTool(),            // Basic info (quick check)
-		tools.NewRecallTool(memorySvc),   // Direct memory access for LIVIVA
-		tools.NewRememberTool(memorySvc), // Direct memory write for LIVIVA
-		agenttool.New(sysAdmin, nil),     // name: "sysadmin"
-		agenttool.New(analyst, nil),      // name: "analyst"
+		tools.GetRemoteSystemTool(dispatcher), // Basic client info
+		tools.NewRecallTool(memorySvc),        // Direct memory access for LIVIVA
+		tools.NewRememberTool(memorySvc),      // Direct memory write for LIVIVA
+		agenttool.New(sysAdmin, nil),          // name: "sysadmin"
+		agenttool.New(analyst, nil),           // name: "analyst"
 	}
 
 	if voiceOutput != nil {

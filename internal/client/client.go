@@ -9,6 +9,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -210,6 +211,17 @@ func handleToolRequest(stream api.LivivaService_ChatSessionClient, req *api.Tool
 	var errVal string
 
 	switch req.ToolName {
+	case "system.info":
+		hostname, _ := os.Hostname()
+		info := map[string]any{
+			"os":       runtime.GOOS,
+			"arch":     runtime.GOARCH,
+			"hostname": hostname,
+			"num_cpu":  runtime.NumCPU(),
+		}
+		data, _ := json.Marshal(info)
+		output = string(data)
+
 	case "system.exec":
 		var args struct {
 			Command []string `json:"command"`
