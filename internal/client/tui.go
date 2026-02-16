@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	executor "github.com/kalt/liviva/internal/client/exec"
 	"github.com/kalt/liviva/pkg/tui"
 )
 
@@ -46,6 +47,7 @@ type serverMsg struct {
 
 type recordingMsg bool
 type playingMsg bool
+type executingMsg bool // New message type
 
 type metricsMsg struct {
 	promptTokens     int32
@@ -72,9 +74,14 @@ type ChatModel struct {
 	metrics *tui.MetricsModel
 	width   int
 	height  int
+
+	// Execution State
+	executing   bool
+	executor    *executor.Executor
+	toolInputCh chan string
 }
 
-func NewChatModel(sender func(string) tea.Cmd) ChatModel {
+func NewChatModel(sender func(string) tea.Cmd, toolInputCh chan string) ChatModel {
 	// Use new Prompt
 	prmt := tui.NewPrompt()
 
@@ -98,6 +105,8 @@ func NewChatModel(sender func(string) tea.Cmd) ChatModel {
 		palette:     p,
 		dialogs:     dm,
 		metrics:     metrics,
+		executing:   false,
+		toolInputCh: toolInputCh,
 	}
 }
 
@@ -176,9 +185,20 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Standard bubbles behavior: Shift+Enter or Ctrl+J often triggers newline if InsertNewline is set.
 			// But we disabled InsertNewline in NewPrompt keymap.
 
-			// For now, simple Enter submits.
 			val := strings.TrimSpace(m.prompt.Value())
 			if val == "" {
+				break
+			}
+			m.prompt.Reset()
+
+			// If executing, route input to the process
+			if m.executing {
+				// Don't show in chat (PTY will echo if needed, or hide if password)
+				// Send to executor channel
+				select {
+				case m.toolInputCh <- val + "\n": // Add newline as standard input usually expects it
+				default:
+				}
 				break
 			}
 
@@ -194,7 +214,6 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, userMsg)
 
 			cmd = m.sender(val)
-			m.prompt.Reset()
 
 			// Render all messages
 			rendered := m.renderMessages()
@@ -242,6 +261,15 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isRecording = bool(msg)
 	case playingMsg:
 		m.isPlaying = bool(msg)
+	case executingMsg:
+		m.executing = bool(msg)
+		if m.executing {
+			m.prompt.SetPlaceholder("Interact with process...")
+			m.prompt.Focus()
+		} else {
+			m.prompt.SetPlaceholder("Message LIVIVA...")
+			m.prompt.Focus()
+		}
 	case errMsg:
 		m.err = msg
 		return m, tea.Quit
@@ -372,8 +400,12 @@ func (m ChatModel) View() string {
 	// We use the prompt's View which includes the textarea
 	// Wrap it in container style
 	inputView := tui.StyleInputContainer.Width(viewWidth - 2).Render(m.prompt.View())
-	if m.prompt.Focused() {
+	if m.executing {
+		inputView = tui.StyleInputFocused.BorderForeground(lipgloss.Color("208")).Width(viewWidth - 2).Render(m.prompt.View()) // Orange border for Exec
+		m.prompt.SetPlaceholder("Interact with process...")
+	} else if m.prompt.Focused() {
 		inputView = tui.StyleInputFocused.Width(viewWidth - 2).Render(m.prompt.View())
+		m.prompt.SetPlaceholder("Message LIVIVA...")
 	}
 
 	// Combine components
@@ -398,10 +430,10 @@ type AppModel struct {
 	ctx    *tui.Context
 }
 
-func NewAppModel(sender func(string) tea.Cmd) AppModel {
+func NewAppModel(sender func(string) tea.Cmd, toolInputCh chan string) AppModel {
 	ctx := &tui.Context{}
 	router := tui.NewRouter(ctx)
-	chat := NewChatModel(sender)
+	chat := NewChatModel(sender, toolInputCh)
 
 	return AppModel{
 		router: router,

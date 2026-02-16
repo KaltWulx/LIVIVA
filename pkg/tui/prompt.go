@@ -98,3 +98,7 @@ func (p *Prompt) SetWidth(w int) {
 func (p *Prompt) Height() int {
 	return p.textarea.Height()
 }
+
+func (p *Prompt) SetPlaceholder(text string) {
+	p.textarea.Placeholder = text
+}

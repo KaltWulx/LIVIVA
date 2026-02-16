@@ -8,12 +8,12 @@ import (
 	"log"
 	"mime"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
+	executor "github.com/kalt/liviva/internal/client/exec"
 	"github.com/kalt/liviva/pkg/api"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -113,8 +113,25 @@ func Run(addr string) {
 		}
 	}
 
+	var (
+		execMu         sync.Mutex
+		activeExecutor *executor.Executor
+		toolInputCh    = make(chan string, 10)
+	)
+
+	// Input Router
+	go func() {
+		for input := range toolInputCh {
+			execMu.Lock()
+			if activeExecutor != nil {
+				_ = activeExecutor.WriteInput([]byte(input))
+			}
+			execMu.Unlock()
+		}
+	}()
+
 	// Initialize TUI
-	m := NewAppModel(sender)
+	m := NewAppModel(sender, toolInputCh)
 	p = tea.NewProgram(m, tea.WithAltScreen())
 	voice.SetProgram(p)
 
@@ -139,7 +156,8 @@ func Run(addr string) {
 				p.Send(serverMsg{text: pld.SpeakText, isVoice: true})
 				go voice.Speak(pld.SpeakText)
 			case *api.ServerMessage_ToolRequest:
-				go handleToolRequest(stream, pld.ToolRequest)
+				// Pass shared state pointers
+				go handleToolRequest(stream, pld.ToolRequest, &execMu, &activeExecutor)
 			case *api.ServerMessage_Artifact:
 				// Handle artifact download if needed
 			case *api.ServerMessage_Metrics:
@@ -164,7 +182,7 @@ func Run(addr string) {
 // Deprecated functions removed (moved to VoiceService)
 
 // handleToolRequest executes the requested tool and sends the response back
-func handleToolRequest(stream api.LivivaService_ChatSessionClient, req *api.ToolRequest) {
+func handleToolRequest(stream api.LivivaService_ChatSessionClient, req *api.ToolRequest, mu *sync.Mutex, activeEx **executor.Executor) {
 	msg := fmt.Sprintf("Tool Request: %s (ID: %s)", req.ToolName, req.Id)
 	log.Print(msg)
 	if p != nil {
@@ -188,12 +206,51 @@ func handleToolRequest(stream api.LivivaService_ChatSessionClient, req *api.Tool
 			break
 		}
 
-		cmd := exec.Command(args.Command[0], args.Command[1:]...)
-		out, err := cmd.CombinedOutput()
-		output = string(out)
+		// Initialize PTY Executor
+		exe := executor.NewExecutor()
+		mu.Lock()
+		*activeEx = exe
+		mu.Unlock()
+
+		// Notify TUI Execution Mode
+		p.Send(executingMsg(true))
+
+		ptmx, err := exe.Start(args.Command)
 		if err != nil {
 			errVal = fmt.Sprintf("execution failed: %v", err)
+			p.Send(executingMsg(false))
+			mu.Lock()
+			*activeEx = nil
+			mu.Unlock()
+			break
 		}
+
+		// Stream Output
+		var outBuf strings.Builder
+		buf := make([]byte, 1024)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				chunk := string(buf[:n])
+				outBuf.WriteString(chunk) // Buffer for final response
+				// Stream clean lines to TUI for visibility
+				// Note: Raw PTY output might have control chars, for now we just dump it
+				p.Send(serverMsg{text: chunk, isSystem: true})
+			}
+			if err != nil {
+				break
+			}
+		}
+
+		exe.Wait()
+		exe.Close()
+		output = outBuf.String()
+
+		// Cleanup
+		mu.Lock()
+		*activeEx = nil
+		mu.Unlock()
+		p.Send(executingMsg(false))
 
 	default:
 		errVal = fmt.Sprintf("unknown tool: %s", req.ToolName)
