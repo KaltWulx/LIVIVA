@@ -3,7 +3,6 @@ package agents
 import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 
@@ -12,7 +11,7 @@ import (
 )
 
 // NewClientAdminAgent creates a new ClientAdmin agent for local system control.
-func NewClientAdminAgent(model model.LLM, memorySvc memory.Service, dispatcher tools.RemoteDispatcher) (agent.Agent, error) {
+func NewClientAdminAgent(model model.LLM, dispatcher tools.RemoteDispatcher) (agent.Agent, error) {
 	config := llmagent.Config{
 		Name:  "client_admin",
 		Model: model,
@@ -28,10 +27,6 @@ CAPABILITIES:
     *   Use 'get_system_info' to understand the host environment.
     *   **SAFETY FIRST**: You are running on the user's live system. Be extremely careful with destructive commands (rm, dd, etc.).
 
-2.  **Shared Memory**: You share a brain with LIVIVA and the Analyst.
-    *   Use 'remember' to store system configurations, cron schedules, or important paths you discover.
-    *   Use 'recall' to check if we've already mapped this network or set up this service.
-
 BEHAVIOR:
 - Be concise and technical.
 - You are an INTERNAL SERVICE. Do NOT greet the user. Provide raw, technical data and command results to LIVIVA.
@@ -40,8 +35,6 @@ BEHAVIOR:
 		Tools: []tool.Tool{
 			tools.GetRemoteExecuteCommandTool(dispatcher),
 			tools.GetRemoteSystemTool(dispatcher),
-			tools.NewRecallTool(memorySvc),
-			tools.NewRememberTool(memorySvc),
 		},
 		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
 			callbacks.NewDelegationLogger("client_admin"),

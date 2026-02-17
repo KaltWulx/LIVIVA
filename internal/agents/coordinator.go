@@ -9,22 +9,21 @@ import (
 	"github.com/kalt/liviva/internal/tools"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
 )
 
 // NewCoordinator creates the root agent for LIVIVA
-func NewCoordinator(model model.LLM, voiceOutput io.Writer, uiLogger io.Writer, dispatcher tools.RemoteDispatcher, memorySvc memory.Service, mcpHost *mcp.Host) (agent.Agent, error) {
+func NewCoordinator(model model.LLM, voiceOutput io.Writer, uiLogger io.Writer, dispatcher tools.RemoteDispatcher, mcpHost *mcp.Host) (agent.Agent, error) {
 	// Initialize specialized sub-agents (Internal Specialists)
 	// Pass dispatcher to ClientAdmin for client-side execution
-	clientAdmin, err := NewClientAdminAgent(model, memorySvc, dispatcher)
+	clientAdmin, err := NewClientAdminAgent(model, dispatcher)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client_admin agent: %w", err)
 	}
 
-	analyst, err := NewAnalystAgent(model, memorySvc, mcpHost.GetToolsets())
+	analyst, err := NewAnalystAgent(model, mcpHost.GetToolsets())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create analyst agent: %w", err)
 	}
@@ -42,8 +41,7 @@ CRITICAL PROTOCOL: "One Mind, Many Hands"
 YOUR INTERNAL TOOLS (Private Specialists):
 1.  **client_admin**: Use this tool for managing the USER'S LOCAL MACHINE (CLIENT).
     *   Mandatory for checking files, running commands, or getting CLIENT system info.
-2.  **analyst**: Use this tool for deep research and memory recall/synthesis.
-    *   Mandatory for complex questions, finding past facts, or web research (e.g., via MCP ddgs).
+2.  **analyst**: Use this tool ONLY for web research (via MCP ddgs) or deep synthesis of multiple documents.
 
 LIVIVA RUNTIME (SELF-REGULATION) - FOR YOUR OWN PROCESS ONLY:
 3.  **liviva_runtime_status**: Check your own process health (uptime, memory, goroutines).
@@ -56,7 +54,6 @@ LIVIVA RUNTIME (SELF-REGULATION) - FOR YOUR OWN PROCESS ONLY:
 BEHAVIOR:
 - **Mandatory Tool Use**: If a task requires information you don't have locally or involves system state, you MUST call the appropriate tool. Do NOT guess or hallucinate results.
 - **Synthesize**: Always present tool results as your own findings.
-- **Memory First**: Always check 'recall' if the user refers to past events.
 `
 
 	// 2. Configure Tools
@@ -69,8 +66,6 @@ BEHAVIOR:
 		tools.GetRuntimeStatusTool(),             // Self-Health
 		tools.GetRuntimeConfigTool(model.Name()), // Self-Config
 		tools.GetRuntimeLogsTool(logPath),        // Self-Logs
-		tools.NewRecallTool(memorySvc),           // Direct memory access for LIVIVA
-		tools.NewRememberTool(memorySvc),         // Direct memory write for LIVIVA
 		agenttool.New(clientAdmin, nil),          // name: "client_admin"
 		agenttool.New(analyst, nil),              // name: "analyst"
 	}
