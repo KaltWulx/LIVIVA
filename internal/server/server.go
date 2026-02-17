@@ -17,7 +17,6 @@ import (
 	"github.com/kalt/liviva/internal/agents"
 	"github.com/kalt/liviva/internal/llm"
 	"github.com/kalt/liviva/internal/mcp"
-	"github.com/kalt/liviva/internal/services"
 	"github.com/kalt/liviva/internal/store"
 	"github.com/kalt/liviva/pkg/api"
 	"google.golang.org/adk/agent"
@@ -187,10 +186,6 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 	// dedicated dispatcher for tools
 	tDispatcher := &toolDispatcher{safeStream: safe, responses: make(map[string]chan string)}
 
-	// Create Coordinator for this session
-	// TODO: Use a proper session-scoped or global memory service.
-	// For now, we use a new instance per session but sharing the same DB.
-	memorySvc := services.NewSQLiteMemoryService(store.DB)
 	// Initialize MCP Host
 	mcpConfigPath := os.Getenv("MCP_CONFIG_PATH")
 	if mcpConfigPath == "" {
@@ -207,14 +202,12 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 		log.Printf("Failed to initialize MCP Host: %v. Continuing without MCP tools.", err)
 		mcpHost = &mcp.Host{}
 	} else {
-		// Initialize connections (mcptoolset will handle actual connection on usage, or we trigger it)
-		// My Host.Start iterates and creates toolsets.
 		if err := mcpHost.Start(stream.Context()); err != nil {
 			log.Printf("Error starting MCP servers: %v", err)
 		}
 	}
 
-	coord, err := agents.NewCoordinator(s.llmModel, vWriter, uLogger, tDispatcher, memorySvc, mcpHost)
+	coord, err := agents.NewCoordinator(s.llmModel, vWriter, uLogger, tDispatcher, mcpHost)
 	if err != nil {
 		return fmt.Errorf("failed to create coordinator: %w", err)
 	}
