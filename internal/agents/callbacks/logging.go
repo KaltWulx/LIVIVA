@@ -24,8 +24,9 @@ func NewDelegationLogger(agentName string) func(ctx agent.CallbackContext, req *
 func NewSpecialistCallLogger(out io.Writer) func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	return func(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 		toolName := t.Name()
-		// Log only for the wrapped specialist agents to show delegation in the UI/Logs
-		if toolName == "sysadmin" || toolName == "analyst" {
+		// Log for the wrapped specialist agents and workflows to show delegation in the UI/Logs
+		switch toolName {
+		case "client_admin", "analyst", "deep_research", "verified_execution":
 			msg := fmt.Sprintf("\n[LIVIVA System] 🔄 Delegating task to internal specialist: %s\n", toolName)
 			if out != nil {
 				_, _ = out.Write([]byte(msg))
