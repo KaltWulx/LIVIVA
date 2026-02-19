@@ -408,10 +408,8 @@ func (m *OpenAIModel) prepareRequest(req *model.LLMRequest, stream bool) ([]byte
 			})
 		} else {
 			// User or Tool response
-			hasToolResponse := false
 			for _, part := range content.Parts {
 				if part.FunctionResponse != nil {
-					hasToolResponse = true
 					respBytes, _ := json.Marshal(part.FunctionResponse.Response)
 					messages = append(messages, OpenAIMessage{
 						Role:       "tool",
@@ -421,17 +419,21 @@ func (m *OpenAIModel) prepareRequest(req *model.LLMRequest, stream bool) ([]byte
 				}
 			}
 
-			if !hasToolResponse {
-				// Regular user message - now supports multimodal (Text + InlineData)
+			// Also support multimodal (Text + InlineData) in the same Content if Role is User
+			// Or if it's a User turn that also has tool responses (unlikely but possible in some schemas)
+			if content.Role == genai.RoleUser || content.Role == "" {
 				contentParts := []OpenAIContentPart{}
+				hasMultimodal := false
 				for _, part := range content.Parts {
 					if part.Text != "" {
+						hasMultimodal = true
 						contentParts = append(contentParts, OpenAIContentPart{
 							Type: "text",
 							Text: part.Text,
 						})
 					}
 					if part.InlineData != nil {
+						hasMultimodal = true
 						// Convert binary data to base64 data URL
 						data64 := base64.StdEncoding.EncodeToString(part.InlineData.Data)
 						dataURL := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MIMEType, data64)
@@ -444,15 +446,19 @@ func (m *OpenAIModel) prepareRequest(req *model.LLMRequest, stream bool) ([]byte
 					}
 				}
 
-				// If only 1 text part, we can keep it simple as a string (optional)
-				// But using []OpenAIContentPart is robust.
-				messages = append(messages, OpenAIMessage{
-					Role:    "user",
-					Content: contentParts,
-				})
+				if hasMultimodal {
+					messages = append(messages, OpenAIMessage{
+						Role:    "user",
+						Content: contentParts,
+					})
+				}
 			}
 		}
 	}
+
+	// Sanitize: remove any orphan "tool" messages that lack a preceding "assistant" with matching tool_calls.
+	// This is the final defense against OpenAI's strict message ordering requirements.
+	messages = sanitizeToolMessages(messages)
 
 	// ToolDeclarer is an interface for tools that can provide their own GenAI declaration
 	type ToolDeclarer interface {
@@ -521,6 +527,35 @@ type OpenAIToolCall struct {
 	ID       string             `json:"id"`
 	Type     string             `json:"type"`
 	Function OpenAIFunctionCall `json:"function"`
+}
+
+// sanitizeToolMessages removes any "tool" role messages whose tool_call_id
+// does not match a tool_call in a preceding "assistant" message.
+// This prevents OpenAI 400 errors when history pruning or ADK content
+// manipulation leaves orphaned tool responses.
+func sanitizeToolMessages(messages []OpenAIMessage) []OpenAIMessage {
+	// Build a set of all known tool_call IDs from assistant messages
+	knownToolCallIDs := make(map[string]bool)
+
+	result := make([]OpenAIMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == "assistant" {
+			for _, tc := range msg.ToolCalls {
+				knownToolCallIDs[tc.ID] = true
+			}
+			result = append(result, msg)
+		} else if msg.Role == "tool" {
+			// Only keep if the tool_call_id matches a known assistant tool_call
+			if knownToolCallIDs[msg.ToolCallID] {
+				result = append(result, msg)
+			} else {
+				log.Printf("[OpenAI] Dropping orphan tool message (tool_call_id: %s) - no matching assistant tool_calls", msg.ToolCallID)
+			}
+		} else {
+			result = append(result, msg)
+		}
+	}
+	return result
 }
 
 // sanitizeSchema recursively converts schema types to lowercase and ensures root is an object
