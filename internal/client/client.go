@@ -4,18 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"io"
 	"log"
 	"mime"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	executor "github.com/kalt/liviva/internal/client/exec"
 	"github.com/kalt/liviva/pkg/api"
+	"github.com/kbinani/screenshot"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -24,6 +28,7 @@ var (
 	p      *tea.Program
 	sendMu sync.Mutex // Mutex for gRPC stream
 	voice  *VoiceService
+	input  *InputService
 )
 
 // Run starts the client TUI
@@ -40,6 +45,14 @@ func Run(addr string) {
 
 	// Initialize Voice Service
 	voice = NewVoiceService()
+
+	// Initialize Input Service (Optional, might fail if no permissions)
+	input, err = NewInputService()
+	if err != nil {
+		log.Printf("Warning: Input service failed to initialize: %v", err)
+	} else {
+		defer input.Close()
+	}
 
 	// Dial Server
 	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -291,6 +304,124 @@ func handleToolRequest(stream api.LivivaService_ChatSessionClient, req *api.Tool
 		*activeEx = nil
 		mu.Unlock()
 		p.Send(executingMsg(false))
+
+	case "keyboard_type":
+		if input == nil {
+			errVal = "input service not available. TIP: ensure current user has write access to /dev/uinput"
+			break
+		}
+		var args struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(req.ArgumentsJson), &args); err != nil {
+			errVal = fmt.Sprintf("failed to parse arguments: %v", err)
+			break
+		}
+		if err := input.Type(args.Text); err != nil {
+			errVal = fmt.Sprintf("typing failed: %v", err)
+		} else {
+			output = "Typed text successfully"
+		}
+
+	case "mouse_move":
+		if input == nil {
+			errVal = "input service not available. TIP: ensure current user has write access to /dev/uinput"
+			break
+		}
+		var args struct {
+			X int32 `json:"x"`
+			Y int32 `json:"y"`
+		}
+		if err := json.Unmarshal([]byte(req.ArgumentsJson), &args); err != nil {
+			errVal = fmt.Sprintf("failed to parse arguments: %v", err)
+			break
+		}
+		if err := input.MouseMove(args.X, args.Y); err != nil {
+			errVal = fmt.Sprintf("mouse move failed: %v", err)
+		} else {
+			output = fmt.Sprintf("Moved mouse to %d, %d", args.X, args.Y)
+		}
+
+	case "mouse_click":
+		if input == nil {
+			errVal = "input service not available. TIP: ensure current user has write access to /dev/uinput"
+			break
+		}
+		if err := input.MouseClick(); err != nil {
+			errVal = fmt.Sprintf("mouse click failed: %v", err)
+		} else {
+			output = "Mouse clicked"
+		}
+
+	case "mouse_scroll":
+		if input == nil {
+			errVal = "input service not available. TIP: ensure current user has write access to /dev/uinput"
+			break
+		}
+		var args struct {
+			Amount int32 `json:"amount"`
+		}
+		if err := json.Unmarshal([]byte(req.ArgumentsJson), &args); err != nil {
+			errVal = fmt.Sprintf("failed to parse arguments: %v", err)
+			break
+		}
+		if err := input.MouseScroll(args.Amount); err != nil {
+			errVal = fmt.Sprintf("mouse scroll failed: %v", err)
+		} else {
+			output = "Mouse scrolled"
+		}
+
+	case "screen_capture":
+		var tmpFile string
+		var captureErr error
+
+		if isWayland() {
+			// Skip screenshot library entirely on Wayland to avoid XGB errors
+			tmpFile = filepath.Join(os.TempDir(), fmt.Sprintf("screenshot_%d.png", time.Now().Unix()))
+			cmd := exec.Command("grim", tmpFile)
+			if err := cmd.Run(); err != nil {
+				errVal = fmt.Sprintf("failed to capture screen via grim: %v", err)
+				break
+			}
+		} else {
+			n := screenshot.NumActiveDisplays()
+			if n <= 0 {
+				errVal = "no active displays found"
+				break
+			}
+			bounds := screenshot.GetDisplayBounds(0)
+			img, err := screenshot.CaptureRect(bounds)
+			if err != nil {
+				captureErr = err
+			} else {
+				tmpFile = filepath.Join(os.TempDir(), fmt.Sprintf("screenshot_%d.png", time.Now().Unix()))
+				f, err := os.Create(tmpFile)
+				if err != nil {
+					errVal = fmt.Sprintf("failed to create temp file: %v", err)
+					break
+				}
+				err = png.Encode(f, img)
+				f.Close()
+				if err != nil {
+					errVal = fmt.Sprintf("failed to encode screenshot: %v", err)
+					break
+				}
+			}
+		}
+
+		if captureErr != nil {
+			errVal = fmt.Sprintf("failed to capture screen: %v", captureErr)
+			break
+		}
+
+		// Upload to server
+		if err := sendArtifact(stream, tmpFile); err != nil {
+			errVal = fmt.Sprintf("failed to upload screenshot: %v", err)
+		} else {
+			output = filepath.Base(tmpFile)
+			// Cleanup local temp file
+			os.Remove(tmpFile)
+		}
 
 	default:
 		errVal = fmt.Sprintf("unknown tool: %s", req.ToolName)

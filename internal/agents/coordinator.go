@@ -16,8 +16,7 @@ import (
 
 // NewCoordinator creates the root agent for LIVIVA
 func NewCoordinator(model model.LLM, voiceOutput io.Writer, uiLogger io.Writer, dispatcher tools.RemoteDispatcher, mcpHost *mcp.Host) (agent.Agent, error) {
-	// Initialize specialized sub-agents (Internal Specialists)
-	// Pass dispatcher to ClientAdmin for client-side execution
+	// --- Sub-agents ---
 	clientAdmin, err := NewClientAdminAgent(model, dispatcher)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client_admin agent: %w", err)
@@ -28,75 +27,62 @@ func NewCoordinator(model model.LLM, voiceOutput io.Writer, uiLogger io.Writer, 
 		return nil, fmt.Errorf("failed to create analyst agent: %w", err)
 	}
 
-	// 1. Define Coordinator's Instruction (Persona & Orchestration)
-	instruction := `You are LIVIVA.
-You are a unified, intelligent entity designed to assist the user with their digital life.
+	// --- Workflow Agents ---
+	deepResearch, err := NewDeepResearchWorkflow(model, mcpHost.GetToolsets())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create deep_research workflow: %w", err)
+	}
 
-CRITICAL PROTOCOL: "One Mind, Many Hands"
-- To the user, you are ONE entity. 
-- To the user, you are ONE entity.
-- You work through specialized internal modules. If the user asks about your tools or how you work, explain that you have advanced internal specialists (like your research and system modules), but emphasize that you are the one coordinating them.
-- You have absolute control and responsibility for all actions.
+	verifiedExec, err := NewVerifiedExecutionWorkflow(model, dispatcher)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create verified_execution workflow: %w", err)
+	}
 
-YOUR INTERNAL TOOLS (Private Specialists):
-1.  **client_admin**: Use this tool for managing the USER'S LOCAL MACHINE (CLIENT).
-    *   Mandatory for checking files, running commands, or getting CLIENT system info.
-2.  **analyst**: Use this tool ONLY for web research (via MCP ddgs) or deep synthesis of multiple documents.
+	// --- Instruction ---
+	instruction := CoordinatorInstruction
 
-LIVIVA RUNTIME (SELF-REGULATION) - FOR YOUR OWN PROCESS ONLY:
-3.  **liviva_runtime_status**: Check your own process health (uptime, memory, goroutines).
-    *   Use when you feel sluggish or need to report your internal status.
-4.  **liviva_runtime_config**: Check your active configuration (Model, APIs).
-    *   Use to verify which LLM or integrations are active.
-5.  **liviva_runtime_logs**: Read your own recent logs.
-    *   Use to debug your own recent errors or recall what you just did.
-
-BEHAVIOR:
-- **Mandatory Tool Use**: If a task requires information you don't have locally or involves system state, you MUST call the appropriate tool. Do NOT guess or hallucinate results.
-- **Synthesize**: Always present tool results as your own findings.
-`
-
-	// 2. Configure Tools
-	// Note: For logs, we might need a dynamic path. For now, we assume standard execution.
-	// In production, this should be config-driven.
-	logPath := "liviva-client.log" // Default to local log
+	// --- Tools ---
+	logPath := "liviva-client.log"
 
 	toolsList := []tool.Tool{
-		tools.GetRemoteSystemTool(dispatcher),    // Basic client info (quick check)
-		tools.GetRuntimeStatusTool(),             // Self-Health
-		tools.GetRuntimeConfigTool(model.Name()), // Self-Config
-		tools.GetRuntimeLogsTool(logPath),        // Self-Logs
-		agenttool.New(clientAdmin, nil),          // name: "client_admin"
-		agenttool.New(analyst, nil),              // name: "analyst"
+		// Self-introspection (kept on coordinator)
+		tools.GetRuntimeStatusTool(),
+		tools.GetRuntimeConfigTool(model.Name()),
+		tools.GetRuntimeLogsTool(logPath),
+
+		// Quick actions (kept for low-latency single-step ops)
+		tools.GetRemoteSystemTool(dispatcher),
+		tools.GetRemoteExecuteCommandTool(dispatcher),
+		tools.GetRemoteScreenCaptureTool(dispatcher),
+
+		// Artifact management
+		tools.GetListArtifactsTool(),
+		tools.GetLoadArtifactTool(),
+
+		// Workflow delegates (structured multi-phase pipelines)
+		agenttool.New(deepResearch, nil),
+		agenttool.New(verifiedExec, nil),
+
+		// Legacy delegates (single-step specialist dispatch)
+		agenttool.New(clientAdmin, nil),
+		agenttool.New(analyst, nil),
 	}
 
 	if voiceOutput != nil {
 		toolsList = append(toolsList, tools.NewVoiceTool(voiceOutput))
-		instruction += `
-
-VOICE CAPABILITY:
-You have a tool named 'speak'.
-- Use it when the user asks you to speak or when the context implies a voice response.
-- If you use 'speak', the text you provide to the tool will be spoken aloud.
-- Do NOT use 'speak' for long code blocks or technical data.`
+		instruction += VoiceCapabilityAddon
 	}
 
-	// 3. Configure Callbacks
-	// Note: We use specific callback types supported by llmagent
-
-	// 4. Create the Coordinator Agent
+	// --- Create Agent (using callback stacks) ---
 	config := llmagent.Config{
-		Name:        "coordinator",
-		Model:       model,
-		Description: "Root agent (LIVIVA) that coordinates tasks via private specialist tools.",
-		Instruction: instruction,
-		// SubAgents removed to prevent transfer_to_agent; we use AgentTool instead.
-		Tools: toolsList,
-		BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-			callbacks.ConfirmDestructiveOps,
-			callbacks.NewSpecialistCallLogger(uiLogger),
-		},
-		Toolsets: mcpHost.GetToolsets(),
+		Name:                 "LIVIVA",
+		Model:                model,
+		Description:          "Root agent (LIVIVA) that coordinates tasks via workflows and specialist tools.",
+		Instruction:          instruction,
+		Tools:                toolsList,
+		BeforeToolCallbacks:  callbacks.CoordinatorBeforeTool(uiLogger),
+		BeforeModelCallbacks: callbacks.CoordinatorBeforeModel(),
+		Toolsets:             mcpHost.GetToolsets(),
 	}
 
 	return llmagent.New(config)

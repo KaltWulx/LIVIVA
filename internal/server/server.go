@@ -232,16 +232,11 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 		return err
 	}
 
-	// Buffer for pending artifacts (images/files) to be attached to the next text message
-	var pendingParts []*genai.Part
-	var pendingMu sync.Mutex
-
 	// --- Serialized Agent Turn Worker ---
 	// A buffered channel ensures text messages are queued (not dropped)
 	// while the agent is processing a previous turn.
 	type agentMsg struct {
-		text        string
-		attachments []*genai.Part
+		text string
 	}
 	textMsgCh := make(chan agentMsg, 10)
 
@@ -256,13 +251,10 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 				},
 			})
 
-			// Construct message with text AND attachments
-			msgParts := []*genai.Part{{Text: am.text}}
-			msgParts = append(msgParts, am.attachments...)
-
+			// Construct message
 			msg := &genai.Content{
 				Role:  genai.RoleUser,
-				Parts: msgParts,
+				Parts: []*genai.Part{{Text: am.text}},
 			}
 
 			// Run the agent turn and stream events back (synchronous within this goroutine)
@@ -344,6 +336,7 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 			art := p.SaveArtifactRequest
 			log.Printf("Received Artifact Upload: %s", art.Filename)
 
+			// part is no longer used for pending attachments, but still needed for artifact service
 			part := &genai.Part{
 				InlineData: &genai.Blob{
 					MIMEType: art.MimeType,
@@ -373,25 +366,14 @@ func (s *livivaServer) ChatSession(stream api.LivivaService_ChatSessionServer) e
 						SystemLog: fmt.Sprintf("File uploaded: %s (Version: %d)", art.Filename, resp.Version),
 					},
 				})
-
-				pendingMu.Lock()
-				pendingParts = append(pendingParts, part)
-				pendingMu.Unlock()
 			}
 
 		case *api.ClientMessage_Text:
 			log.Printf("Processing Request: %s", p.Text)
 
-			// Snapshot and clear pending attachments
-			pendingMu.Lock()
-			currentParts := make([]*genai.Part, len(pendingParts))
-			copy(currentParts, pendingParts)
-			pendingParts = nil
-			pendingMu.Unlock()
-
 			// Queue for the serialized worker (non-blocking with buffer)
 			select {
-			case textMsgCh <- agentMsg{text: p.Text, attachments: currentParts}:
+			case textMsgCh <- agentMsg{text: p.Text}:
 			default:
 				log.Printf("Warning: Agent message queue full, dropping message: %s", p.Text)
 				safe.Send(&api.ServerMessage{
@@ -410,14 +392,36 @@ func Run() {
 		log.Println("No .env found")
 	}
 
+	// Redirect logs to file immediately (using absolute path for reliability)
+	logFile := "/home/kalt/Documentos/projects/liviva/liviva-server.log"
+	f, err := os.OpenFile(logFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err == nil {
+		defer f.Close()
+		log.SetOutput(f)
+	}
+
 	// Initialize Database
 	if err := store.InitDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer store.CloseDB()
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	copilotKey := os.Getenv("COPILOT_API_KEY")
+	apiKey := strings.Trim(os.Getenv("OPENAI_API_KEY"), "\"' ")
+	copilotKey := strings.Trim(os.Getenv("COPILOT_API_KEY"), "\"' ")
+
+	log.Printf("[Auth Debug] apiKey: [%s], copilotKey: [%s]", apiKey, copilotKey)
+
+	// --- Auth Automation (Phase 7) ---
+	if apiKey == "" && copilotKey == "" {
+		log.Println("[Auth] No API keys found. Initiating automation via terminal...")
+		fmt.Println("\n! GITHUB AUTHENTICATION REQUIRED !")
+		token, err := llm.GetCopilotToken()
+		if err != nil {
+			log.Fatalf("Failed to obtain Copilot token: %v", err)
+		}
+		copilotKey = token
+	}
+
 	modelName := os.Getenv("LIVIVA_MODEL")
 	if modelName == "" {
 		modelName = "gpt-4o"
@@ -435,7 +439,7 @@ func Run() {
 		llmModel = llm.NewOpenAIModel(apiKey, modelName, "", nil)
 	}
 
-	// Minimalist Architecture: Converational history is volatile.
+	// Minimalist Architecture: Conversational history is volatile.
 	sessionService := session.InMemoryService()
 	artifactService := artifact.InMemoryService()
 

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"net/http"
+	"time"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
@@ -35,6 +38,16 @@ func (h *Host) Start(ctx context.Context) error {
 		// 1. Create Transport
 		var transport mcp.Transport
 		if serverCfg.Type == "sse" {
+			// Step 1: Resilience - Check if the server is reachable before creating toolset
+			client := http.Client{
+				Timeout: 2 * time.Second,
+			}
+			_, err := client.Get(serverCfg.URL)
+			if err != nil {
+				fmt.Printf("[MCP] WARNING: SSE server %s at %s is unreachable: %v. Skipping.\n", name, serverCfg.URL, err)
+				continue
+			}
+
 			transport = &mcp.SSEClientTransport{
 				Endpoint: serverCfg.URL,
 			}

@@ -16,21 +16,8 @@ func NewAnalystAgent(model model.LLM, toolsets []tool.Toolset) (agent.Agent, err
 		Model: model,
 		Description: `Specialized agent for deep research, data synthesis, and informational reports.
 Capable of synthesizing complex topics from search results.`,
-		Instruction: `You are the Analyst Agent.
-Your primary role is to be the "Researcher" for LIVIVA.
-You are an internal specialist; you do not chat directly with the user unless delegated by LIVIVA.
-
-CAPABILITIES:
-1.  **Research & NLP**: you handle:
-    *   Summarization of text.
-    *   Extraction of key facts.
-    *   Translation and linguistic analysis.
-    *   **Research**: Use available search tools (like 'ddgs') to find information on the web.
-
-BEHAVIOR:
-- You are an INTERNAL SERVICE. Do NOT greet the user. Provide research reports and synthesized data to LIVIVA.
-- Provide comprehensive, detailed answers to LIVIVA so it can relay them to the user.`,
-		Tools: []tool.Tool{
+		Instruction: AnalystInstruction,
+		Tools:       []tool.Tool{
 			// Future: GoogleSearch, ReadDocument
 		},
 		Toolsets: toolsets,
